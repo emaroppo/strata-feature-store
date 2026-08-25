@@ -1,0 +1,25 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run ruff check .
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # Includes the purity check, which imports the spec subpackage in a clean
+      # interpreter and fails if a database driver or an S3 client came with it.
+      # In a dev checkout everything is installed, so this is the only thing
+      # standing between the boundary and a convenient import.
+      - run: uv run pytest -q

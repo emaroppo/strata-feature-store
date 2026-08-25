@@ -1,0 +1,23 @@
+# This file names locations, not secrets. Copy to config.toml, which is
+# gitignored. Credentials come from the environment; see .env.example.
+
+[catalog]
+# The Postgres holding descriptions, pointers and lineage. No feature values
+# ever land here.
+url = "postgresql+psycopg://feature_store@localhost:5432/feature_store"
+
+[storage]
+# Garage, or any S3-compatible endpoint. boto3 wants a scheme here; DuckDB
+# does not, and duck.py strips it.
+endpoint_url = "http://localhost:3900"
+bucket = "feature-store"
+region = "garage"
+# Garage serves path-style addressing. Virtual-host style needs DNS that a
+# self-hosted instance does not have.
+addressing_style = "path"
+
+[entities]
+# The vocabulary every stored parquet is written in. Sources declare what they
+# publish in; standardisation converts to this. Right for country panels, wrong
+# for actors or firms, which is why it is configuration.
+canonical_namespace = "iso3166-1-alpha3"

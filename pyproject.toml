@@ -1,0 +1,56 @@
+[project]
+name = "feature-store"
+version = "0.1.0"
+description = "Point-in-time correct storage, standardisation and retrieval for revised panel data"
+requires-python = ">=3.12"
+dependencies = [
+    # The spec subpackage needs this and nothing else. Everything below is
+    # store-only; see the purity test in tests/spec.
+    "pydantic>=2.7",
+    # Catalog. psycopg because there is no SQLite fallback by design.
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.2",
+    # Bytes in, bytes out.
+    "boto3>=1.34",
+    # Reading source files and writing long-format parquet.
+    "pyarrow>=16.0",
+    "polars>=1.0",
+    # Composition. Reads parquet straight from the bucket over httpfs.
+    "duckdb>=1.0",
+    # CLI.
+    "typer>=0.12",
+    "rich>=13.0",
+]
+
+[project.scripts]
+feature-store = "feature_store.store.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "hypothesis>=6.100",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/feature_store"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: needs a live Postgres and a live Garage container",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Pinned: ruff's default set widens between releases.
+select = ["E", "F", "I"]
