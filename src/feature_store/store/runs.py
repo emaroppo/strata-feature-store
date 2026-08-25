@@ -11,11 +11,21 @@ The alternative, a ``record_lineage()`` call that writers are expected to make,
 gets skipped exactly once and then always, and a catalog whose lineage is
 partial is worse than one with none: it looks trustworthy.
 
-**Invariant 1 is checked at the close of the run**, before the transaction
-commits. A run whose outputs claim a ``knowledge_time`` earlier than its inputs
-has looked into the future somewhere, and the arithmetic catches most lookahead
-bugs that survive the join logic. A failing run is marked ``failed`` and leaves
-its objects orphaned rather than catalogued, which is the recoverable direction.
+**Invariant 1 is checked at the close of the run.** A run whose outputs claim a
+``knowledge_time`` earlier than its inputs has looked into the future somewhere,
+and the arithmetic catches most lookahead bugs that survive the join logic.
+
+**A run is many transactions, not one.** Each write commits as it happens, and
+the run row stays ``running`` until the whole thing finishes. Visibility comes
+from the run's status rather than from an uncommitted transaction: a reader
+filters to partitions whose creating run reached ``ok``, so a half-finished
+ingest is invisible for the same reason it was before — but its work survives a
+crash, its progress is observable, and the retry is cheap because an identical
+part is already a no-op.
+
+Holding one transaction open for the whole run bought that same visibility more
+bluntly, at the cost of a twenty-minute snapshot, no progress, and discarding
+every catalog row when the last batch failed.
 """
 
 from __future__ import annotations
@@ -50,37 +60,63 @@ class Run:
 
     Constructed only by :func:`run`. The ``id`` exists before any output does,
     which is what lets a write reference it without a second pass.
+
+    Holds an engine rather than a connection, and opens a short transaction per
+    write. ``connection`` is set only while inside :meth:`transaction`, so a
+    catalog write attempted outside one fails immediately rather than silently
+    joining somebody else's transaction.
     """
 
     id: int
     kind: str
     name: str
-    connection: sa.Connection
+    engine: sa.Engine
     params: dict[str, Any]
+    connection: sa.Connection | None = None
     _inputs: list[tuple[str, int, str]] = field(default_factory=list)
     _outputs: list[tuple[str, int, str]] = field(default_factory=list)
     _max_knowledge_time: datetime | None = None
     _notes: dict[str, Any] = field(default_factory=dict)
+
+    @contextmanager
+    def transaction(self) -> Iterator[sa.Connection]:
+        """A short transaction, reentrant so nested writes share one.
+
+        Reentrancy matters: a caller that wraps several catalog writes in one
+        transaction gets atomicity across them, while a lone write still commits
+        on its own without the caller arranging anything.
+        """
+        if self.connection is not None:
+            yield self.connection
+            return
+        with self.engine.begin() as connection:
+            self.connection = connection
+            try:
+                yield connection
+            finally:
+                self.connection = None
 
     def read(self, ref_type: str, ref_id: int, role: str = "input") -> None:
         """Record that this run read something."""
         self._inputs.append((ref_type, ref_id, role))
         # Recording the same read twice is harmless and happens naturally when a
         # run loops; the lineage edge is the fact, not how often it was noticed.
-        self.connection.execute(
-            pg_insert(run_input)
-            .values(run_id=self.id, ref_type=ref_type, ref_id=ref_id, role=role)
-            .on_conflict_do_nothing()
-        )
+        with self.transaction() as connection:
+            connection.execute(
+                pg_insert(run_input)
+                .values(run_id=self.id, ref_type=ref_type, ref_id=ref_id, role=role)
+                .on_conflict_do_nothing()
+            )
 
     def wrote(self, ref_type: str, ref_id: int, role: str = "output") -> None:
         """Record that this run produced something."""
         self._outputs.append((ref_type, ref_id, role))
-        self.connection.execute(
-            pg_insert(run_output)
-            .values(run_id=self.id, ref_type=ref_type, ref_id=ref_id, role=role)
-            .on_conflict_do_nothing()
-        )
+        with self.transaction() as connection:
+            connection.execute(
+                pg_insert(run_output)
+                .values(run_id=self.id, ref_type=ref_type, ref_id=ref_id, role=role)
+                .on_conflict_do_nothing()
+            )
 
     def observed_knowledge_time(self, when: datetime | None) -> None:
         """Raise this run's high-water mark, used by invariant 1."""
@@ -159,13 +195,17 @@ def _inputs_max_knowledge_time(connection: sa.Connection, run_id: int) -> dateti
     # Every run that produced something this run read. A reference matches on
     # both halves: ref_type alone would join a release id against a partition id
     # that happens to share a number.
-    producing = sa.select(run_output.c.run_id).join(
-        run_input,
-        sa.and_(
-            run_input.c.ref_type == run_output.c.ref_type,
-            run_input.c.ref_id == run_output.c.ref_id,
-        ),
-    ).where(run_input.c.run_id == run_id)
+    producing = (
+        sa.select(run_output.c.run_id)
+        .join(
+            run_input,
+            sa.and_(
+                run_input.c.ref_type == run_output.c.ref_type,
+                run_input.c.ref_id == run_output.c.ref_id,
+            ),
+        )
+        .where(run_input.c.run_id == run_id)
+    )
     return connection.execute(
         sa.select(sa.func.max(run_table.c.max_knowledge_time)).where(run_table.c.id.in_(producing))
     ).scalar_one_or_none()
@@ -173,7 +213,7 @@ def _inputs_max_knowledge_time(connection: sa.Connection, run_id: int) -> dateti
 
 @contextmanager
 def run(
-    connection: sa.Connection,
+    engine: sa.Engine,
     kind: str,
     name: str,
     params: dict[str, Any] | None = None,
@@ -184,51 +224,55 @@ def run(
 ) -> Iterator[Run]:
     """Open a run, yield it, and close it with its status and lineage recorded.
 
-    The row is inserted before the body executes, so a process killed mid-run
-    leaves a ``running`` row naming what it was doing rather than no trace at
-    all. ``verify --run`` is what reconciles those afterwards.
+    The row is committed before the body executes, so a process killed mid-run
+    leaves a ``running`` row naming what it was doing, alongside whatever work it
+    had already committed. ``verify --run`` is what reconciles those afterwards.
     """
     params = params or {}
     sha, dirty = git_state()
     started = _naive_utc_now()
-    run_id = connection.execute(
-        sa.insert(run_table)
-        .values(
-            kind=kind,
-            name=name,
-            config_hash=content_hash(params),
-            code_git_sha=sha,
-            code_dirty=int(dirty),
-            # Through the canonical form, so a JSONB column never meets a date
-            # its driver cannot serialise, and so what is stored is exactly what
-            # config_hash was computed over.
-            params=to_jsonable(params),
-            env=to_jsonable(environment()),
-            status="running",
-            started_at=started,
-        )
-        .returning(run_table.c.id)
-    ).scalar_one()
+    with engine.begin() as connection:
+        run_id = connection.execute(
+            sa.insert(run_table)
+            .values(
+                kind=kind,
+                name=name,
+                config_hash=content_hash(params),
+                code_git_sha=sha,
+                code_dirty=int(dirty),
+                # Through the canonical form, so a JSONB column never meets a
+                # date its driver cannot serialise, and so what is stored is
+                # exactly what config_hash was computed over.
+                params=to_jsonable(params),
+                env=to_jsonable(environment()),
+                status="running",
+                started_at=started,
+            )
+            .returning(run_table.c.id)
+        ).scalar_one()
 
-    current = Run(id=run_id, kind=kind, name=name, connection=connection, params=params)
+    current = Run(id=run_id, kind=kind, name=name, engine=engine, params=params)
     try:
         yield current
     except Exception:
-        connection.execute(
-            sa.update(run_table)
-            .where(run_table.c.id == run_id)
-            .values(status="failed", finished_at=_naive_utc_now())
-        )
-        raise
-
-    if check_monotonic and current._max_knowledge_time is not None:
-        inputs_max = _inputs_max_knowledge_time(connection, run_id)
-        if inputs_max is not None and current._max_knowledge_time < inputs_max:
+        with engine.begin() as connection:
             connection.execute(
                 sa.update(run_table)
                 .where(run_table.c.id == run_id)
                 .values(status="failed", finished_at=_naive_utc_now())
             )
+        raise
+
+    if check_monotonic and current._max_knowledge_time is not None:
+        with engine.begin() as connection:
+            inputs_max = _inputs_max_knowledge_time(connection, run_id)
+        if inputs_max is not None and current._max_knowledge_time < inputs_max:
+            with engine.begin() as connection:
+                connection.execute(
+                    sa.update(run_table)
+                    .where(run_table.c.id == run_id)
+                    .values(status="failed", finished_at=_naive_utc_now())
+                )
             raise LineageError(
                 f"run {run_id} ({kind}) produced output knowing only up to "
                 f"{current._max_knowledge_time}, but its inputs already knew up to "
@@ -239,16 +283,19 @@ def run(
     if s3 is not None and bucket is not None:
         manifest_key = write_manifest(s3, bucket, current, started)
 
-    connection.execute(
-        sa.update(run_table)
-        .where(run_table.c.id == run_id)
-        .values(
-            status="ok",
-            finished_at=_naive_utc_now(),
-            max_knowledge_time=current._max_knowledge_time,
-            manifest_key=manifest_key,
+    # The last write, and the one that makes everything this run produced
+    # visible to a reader. Until it lands, the partitions exist and are ignored.
+    with engine.begin() as connection:
+        connection.execute(
+            sa.update(run_table)
+            .where(run_table.c.id == run_id)
+            .values(
+                status="ok",
+                finished_at=_naive_utc_now(),
+                max_knowledge_time=current._max_knowledge_time,
+                manifest_key=manifest_key,
+            )
         )
-    )
 
 
 def manifest(current: Run, started: datetime) -> dict[str, Any]:
@@ -269,9 +316,7 @@ def manifest(current: Run, started: datetime) -> dict[str, Any]:
         "params": current.params,
         "code": {"git_sha": sha, "dirty": dirty},
         "env": environment(),
-        "inputs": [
-            {"ref_type": t, "ref_id": i, "role": r} for t, i, r in sorted(current._inputs)
-        ],
+        "inputs": [{"ref_type": t, "ref_id": i, "role": r} for t, i, r in sorted(current._inputs)],
         "outputs": [
             {"ref_type": t, "ref_id": i, "role": r} for t, i, r in sorted(current._outputs)
         ],

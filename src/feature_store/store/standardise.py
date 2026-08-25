@@ -138,9 +138,7 @@ def _melt_query(
 
     renames = spec.features.name.rename
     if renames:
-        cases = " ".join(
-            f"WHEN '{name}' THEN '{alias}'" for name, alias in sorted(renames.items())
-        )
+        cases = " ".join(f"WHEN '{name}' THEN '{alias}'" for name, alias in sorted(renames.items()))
         feature_name = f"CASE raw_name {cases} ELSE raw_name END"
     else:
         feature_name = "raw_name"
@@ -151,8 +149,7 @@ def _melt_query(
     value_str = "NULL::VARCHAR" if spec.features.kind == "numeric" else "raw_value"
 
     keep = ", ".join(
-        _quote(c)
-        for c in dict.fromkeys([spec.entity.column, spec.event_time.column, *columns])
+        _quote(c) for c in dict.fromkeys([spec.entity.column, spec.event_time.column, *columns])
     )
     melted_on = ", ".join(_quote(c) for c in columns)
 
@@ -253,9 +250,7 @@ def _ensure_group(
 ) -> int:
     group_name = group_name or spec.feature_group
     existing = (
-        run.connection.execute(
-            sa.select(feature_group).where(feature_group.c.name == group_name)
-        )
+        run.connection.execute(sa.select(feature_group).where(feature_group.c.name == group_name))
         .mappings()
         .first()
     )
@@ -438,170 +433,165 @@ def standardise(
     work.mkdir(parents=True, exist_ok=True)
     local_source = work / release["original_filename"]
 
-    with engine.begin() as connection:
-        with open_run(
-            connection,
-            "standardise",
-            f"standardise {release['original_filename']} into {spec.feature_group}",
-            params,
-            s3=s3,
-            bucket=bucket,
-        ) as current:
-            current.read("release", release["id"], role="release")
+    with open_run(
+        engine,
+        "standardise",
+        f"standardise {release['original_filename']} into {spec.feature_group}",
+        params,
+        s3=s3,
+        bucket=bucket,
+    ) as current:
+        current.read("release", release["id"], role="release")
+        if pinned:
+            current.read("dataset_version", pinned["id"], role="crosswalk")
+
+        if not local_source.exists():
+            objects.get_to_file(s3, bucket, release["object_key"], local_source)
+
+        con = duck.connect(
+            settings.storage, memory_limit=memory_limit, temp_directory=work / "spill"
+        )
+        names = _feature_columns(con, str(local_source), spec)
+        relation = _source_relation(str(local_source))
+        ingest_time = _naive_utc_now()
+
+        canonical = settings.canonical_namespace
+        if pinned:
+            url = duck.s3_url(bucket, pinned["object_prefix"])
+            con.execute(f"CREATE OR REPLACE VIEW cw AS SELECT * FROM read_parquet('{url}')")
+
+        groups: dict[str, int] = {}
+        written = unmapped_rows = 0
+        unmapped_ids: set[str] = set()
+        off_boundary = uncastable = 0
+        primary_key = None
+        primary_partition = None
+        column_batches = batches(names)
+
+        for index, batch in enumerate(column_batches):
+            melt = _melt_query(spec, relation, batch, ingest_time)
+            con.execute(f"CREATE OR REPLACE VIEW facts AS {melt}")
+
+            uncastable += con.execute(
+                "SELECT count(*) FROM facts WHERE value_num IS NULL AND value_str IS NULL"
+            ).fetchone()[0]
+            if uncastable:
+                worst = con.execute(
+                    "SELECT feature_name, count(*) FROM facts "
+                    "WHERE value_num IS NULL AND value_str IS NULL "
+                    "GROUP BY 1 ORDER BY 2 DESC LIMIT 5"
+                ).fetchall()
+                raise StandardiseError(
+                    f"{uncastable:,} value(s) could not be cast to the declared type. "
+                    f"Worst offenders: {worst}. Declare the right kind, or exclude them."
+                )
+            off_boundary += check_granularity(con, spec, source["granularity"])
+
             if pinned:
-                current.read("dataset_version", pinned["id"], role="crosswalk")
+                match = (
+                    "cw.source_id = f.entity_id AND cw.valid_from <= f.event_time "
+                    "AND f.event_time < cw.valid_to"
+                )
+                con.execute(
+                    "CREATE OR REPLACE VIEW mapped AS SELECT cw.target_id AS entity_id, "
+                    "f.event_time, f.knowledge_time, f.ingest_time, f.feature_name, "
+                    f"f.value_num, f.value_str FROM facts f JOIN cw ON {match}"
+                )
+                con.execute(
+                    f"CREATE OR REPLACE VIEW unmapped AS SELECT f.* FROM facts f "
+                    f"LEFT JOIN cw ON {match} WHERE cw.source_id IS NULL"
+                )
+                targets = [
+                    ("mapped", spec.feature_group, canonical, "facts"),
+                    (
+                        "unmapped",
+                        f"{spec.feature_group}__unmapped",
+                        source["native_namespace"],
+                        "unmapped",
+                    ),
+                ]
+            else:
+                targets = [("facts", spec.feature_group, canonical, "facts")]
 
-            if not local_source.exists():
-                objects.get_to_file(s3, bucket, release["object_key"], local_source)
-
-            con = duck.connect(
-                settings.storage, memory_limit=memory_limit, temp_directory=work / "spill"
-            )
-            names = _feature_columns(con, str(local_source), spec)
-            relation = _source_relation(str(local_source))
-            ingest_time = _naive_utc_now()
-
-            canonical = settings.canonical_namespace
-            if pinned:
-                url = duck.s3_url(bucket, pinned["object_prefix"])
-                con.execute(f"CREATE OR REPLACE VIEW cw AS SELECT * FROM read_parquet('{url}')")
-
-            groups: dict[str, int] = {}
-            written = unmapped_rows = 0
-            unmapped_ids: set[str] = set()
-            off_boundary = uncastable = 0
-            primary_key = None
-            primary_partition = None
-            column_batches = batches(names)
-
-            for index, batch in enumerate(column_batches):
-                melt = _melt_query(spec, relation, batch, ingest_time)
-                con.execute(f"CREATE OR REPLACE VIEW facts AS {melt}")
-
-                uncastable += con.execute(
-                    "SELECT count(*) FROM facts WHERE value_num IS NULL AND value_str IS NULL"
-                ).fetchone()[0]
-                if uncastable:
-                    worst = con.execute(
-                        "SELECT feature_name, count(*) FROM facts "
-                        "WHERE value_num IS NULL AND value_str IS NULL "
-                        "GROUP BY 1 ORDER BY 2 DESC LIMIT 5"
-                    ).fetchall()
-                    raise StandardiseError(
-                        f"{uncastable:,} value(s) could not be cast to the declared type. "
-                        f"Worst offenders: {worst}. Declare the right kind, or exclude them."
-                    )
-                off_boundary += check_granularity(con, spec, source["granularity"])
-
+            if dry_run:
+                written += con.execute("SELECT count(*) FROM facts").fetchone()[0]
                 if pinned:
-                    match = (
-                        "cw.source_id = f.entity_id AND cw.valid_from <= f.event_time "
-                        "AND f.event_time < cw.valid_to"
-                    )
-                    con.execute(
-                        "CREATE OR REPLACE VIEW mapped AS SELECT cw.target_id AS entity_id, "
-                        "f.event_time, f.knowledge_time, f.ingest_time, f.feature_name, "
-                        f"f.value_num, f.value_str FROM facts f JOIN cw ON {match}"
-                    )
-                    con.execute(
-                        f"CREATE OR REPLACE VIEW unmapped AS SELECT f.* FROM facts f "
-                        f"LEFT JOIN cw ON {match} WHERE cw.source_id IS NULL"
-                    )
-                    targets = [
-                        ("mapped", spec.feature_group, canonical, "facts"),
-                        (
-                            "unmapped",
-                            f"{spec.feature_group}__unmapped",
-                            source["native_namespace"],
-                            "unmapped",
-                        ),
-                    ]
-                else:
-                    targets = [("facts", spec.feature_group, canonical, "facts")]
-
-                if dry_run:
-                    written += con.execute("SELECT count(*) FROM facts").fetchone()[0]
-                    if pinned:
-                        unmapped_rows += con.execute(
-                            "SELECT count(*) FROM unmapped"
-                        ).fetchone()[0]
-                    if progress:
-                        progress(index + 1, len(column_batches), written)
-                    continue
-
-                for view, group_name, namespace, role in targets:
-                    if group_name not in groups:
-                        groups[group_name] = _ensure_group(
-                            current, spec, source, namespace, group_name
-                        )
-                    part = _write_part(
-                        current,
-                        con,
-                        view=view,
-                        group_id=groups[group_name],
-                        group_name=group_name,
-                        namespace=namespace,
-                        parquet_path=work / f"{group_name}-{index:04d}.parquet",
-                        s3=s3,
-                        bucket=bucket,
-                        role=role,
-                    )
-                    if part is None:
-                        continue
-                    if role == "facts":
-                        written += part.rows
-                        primary_key, primary_partition = part.object_key, part.partition_id
-                    else:
-                        unmapped_rows += part.rows
+                    unmapped_rows += con.execute("SELECT count(*) FROM unmapped").fetchone()[0]
                 if progress:
                     progress(index + 1, len(column_batches), written)
+                continue
 
-            if off_boundary:
-                raise StandardiseError(
-                    f"{off_boundary:,} event time(s) do not fall on a {source['granularity']} "
-                    f"{spec.event_time.anchor} boundary. The anchor is probably wrong, and a "
-                    "wrong anchor shifts every derived knowledge_time by up to a period."
+            for view, group_name, namespace, role in targets:
+                if group_name not in groups:
+                    groups[group_name] = _ensure_group(current, spec, source, namespace, group_name)
+                part = _write_part(
+                    current,
+                    con,
+                    view=view,
+                    group_id=groups[group_name],
+                    group_name=group_name,
+                    namespace=namespace,
+                    parquet_path=work / f"{group_name}-{index:04d}.parquet",
+                    s3=s3,
+                    bucket=bucket,
+                    role=role,
                 )
+                if part is None:
+                    continue
+                if role == "facts":
+                    written += part.rows
+                    primary_key, primary_partition = part.object_key, part.partition_id
+                else:
+                    unmapped_rows += part.rows
+            if progress:
+                progress(index + 1, len(column_batches), written)
 
-            if pinned and not dry_run:
-                unmapped_ids = set(
-                    con.execute(
-                        "SELECT DISTINCT f.entity_id FROM (SELECT DISTINCT "
-                        f'"{spec.entity.column}" AS entity_id FROM {relation}) f '
-                        "LEFT JOIN cw ON cw.source_id = f.entity_id "
-                        "WHERE cw.source_id IS NULL"
-                    ).fetchall()
-                )
-
-            registered = 0
-            if not dry_run:
-                for group_name, group_id in groups.items():
-                    registered += _register_features(current, group_id, names, spec)
-                    current.wrote("feature_group", group_id, role="group")
-
-            current.note(
-                rows=written,
-                unmapped_rows=unmapped_rows,
-                unmapped_entities=len(unmapped_ids),
-                features=registered,
-                parts=len(column_batches),
-                crosswalk=(
-                    f"{spec.crosswalk.dataset}@{spec.crosswalk.version}" if spec.crosswalk else None
-                ),
-                dry_run=dry_run or None,
+        if off_boundary:
+            raise StandardiseError(
+                f"{off_boundary:,} event time(s) do not fall on a {source['granularity']} "
+                f"{spec.event_time.anchor} boundary. The anchor is probably wrong, and a "
+                "wrong anchor shifts every derived knowledge_time by up to a period."
             )
 
-            return StandardiseResult(
-                run_id=current.id,
-                feature_group_id=groups.get(spec.feature_group, -1),
-                partition_id=primary_partition,
-                object_key=primary_key,
-                rows_written=written,
-                features_registered=registered if not dry_run else len(names),
-                unmapped_entities=len(unmapped_ids) or unmapped_rows,
-                uncastable_values=uncastable,
-                reused_existing=False,
+        if pinned and not dry_run:
+            unmapped_ids = set(
+                con.execute(
+                    "SELECT DISTINCT f.entity_id FROM (SELECT DISTINCT "
+                    f'"{spec.entity.column}" AS entity_id FROM {relation}) f '
+                    "LEFT JOIN cw ON cw.source_id = f.entity_id "
+                    "WHERE cw.source_id IS NULL"
+                ).fetchall()
             )
+
+        registered = 0
+        if not dry_run:
+            for group_name, group_id in groups.items():
+                registered += _register_features(current, group_id, names, spec)
+                current.wrote("feature_group", group_id, role="group")
+
+        current.note(
+            rows=written,
+            unmapped_rows=unmapped_rows,
+            unmapped_entities=len(unmapped_ids),
+            features=registered,
+            parts=len(column_batches),
+            crosswalk=(
+                f"{spec.crosswalk.dataset}@{spec.crosswalk.version}" if spec.crosswalk else None
+            ),
+            dry_run=dry_run or None,
+        )
+
+        return StandardiseResult(
+            run_id=current.id,
+            feature_group_id=groups.get(spec.feature_group, -1),
+            partition_id=primary_partition,
+            object_key=primary_key,
+            rows_written=written,
+            features_registered=registered if not dry_run else len(names),
+            unmapped_entities=len(unmapped_ids) or unmapped_rows,
+            uncastable_values=uncastable,
+            reused_existing=False,
+        )
 
 
 def load_spec(path: str | Path, overrides: dict[str, Any] | None = None) -> StandardiseSpec:

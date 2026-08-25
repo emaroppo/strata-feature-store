@@ -56,33 +56,32 @@ def register_source(
     description: str | None = None,
 ) -> int:
     """Register a publisher's product, and its vocabulary if it is new."""
-    with engine.begin() as connection:
-        with open_run(
-            connection,
-            "ingest_release",
-            f"register source {name}",
-            {
-                "source": name,
-                "native_namespace": native_namespace,
-                "granularity": granularity,
-                "kind": kind,
-            },
-        ) as current:
-            # The vocabulary is NOT created here. Auto-creating it would make
-            # the guard in add_source unreachable, and a typo in the namespace
-            # would silently mint a new vocabulary that nothing can join to.
-            # Registering a vocabulary is its own deliberate act.
-            source_id = catalog.add_source(
-                current,
-                name=name,
-                native_namespace=native_namespace,
-                granularity=granularity,
-                kind=kind,
-                licence=licence,
-                source_url=source_url,
-                description=description,
-            )
-            current.note(source_id=source_id)
+    with open_run(
+        engine,
+        "ingest_release",
+        f"register source {name}",
+        {
+            "source": name,
+            "native_namespace": native_namespace,
+            "granularity": granularity,
+            "kind": kind,
+        },
+    ) as current:
+        # The vocabulary is NOT created here. Auto-creating it would make
+        # the guard in add_source unreachable, and a typo in the namespace
+        # would silently mint a new vocabulary that nothing can join to.
+        # Registering a vocabulary is its own deliberate act.
+        source_id = catalog.add_source(
+            current,
+            name=name,
+            native_namespace=native_namespace,
+            granularity=granularity,
+            kind=kind,
+            licence=licence,
+            source_url=source_url,
+            description=description,
+        )
+        current.note(source_id=source_id)
     return source_id
 
 
@@ -128,45 +127,44 @@ def add_release(
         "source_url": source_url,
     }
 
-    with engine.begin() as connection:
-        with open_run(
-            connection,
-            "ingest_release",
-            f"ingest {path.name} into {source_name}",
-            params,
-            s3=s3,
-            bucket=bucket,
-        ) as current:
-            # Bytes first, verified, and only then the row.
-            stored = objects.put_file(s3, bucket, path)
+    with open_run(
+        engine,
+        "ingest_release",
+        f"ingest {path.name} into {source_name}",
+        params,
+        s3=s3,
+        bucket=bucket,
+    ) as current:
+        # Bytes first, verified, and only then the row.
+        stored = objects.put_file(s3, bucket, path)
 
-            release_id = catalog.add_release(
-                current,
-                source_id=source["id"],
-                sha256=stored.sha256,
-                object_key=stored.key,
-                size_bytes=stored.size_bytes,
-                original_filename=path.name,
-                media_type=mimetypes.guess_type(path.name)[0],
-                source_url=source_url,
-                released_at=released_at,
-                retrieved_at=params["retrieved_at"],
-                meta=meta,
+        release_id = catalog.add_release(
+            current,
+            source_id=source["id"],
+            sha256=stored.sha256,
+            object_key=stored.key,
+            size_bytes=stored.size_bytes,
+            original_filename=path.name,
+            media_type=mimetypes.guess_type(path.name)[0],
+            source_url=source_url,
+            released_at=released_at,
+            retrieved_at=params["retrieved_at"],
+            meta=meta,
+        )
+        current.note(
+            release_id=release_id,
+            sha256=stored.sha256,
+            size_bytes=stored.size_bytes,
+            uploaded=stored.uploaded,
+        )
+        # A release is a fact that became knowable when it was published.
+        # Recording it here is what lets invariant 1 compare a later
+        # standardise run against the release it read.
+        if released_at is not None:
+            current.observed_knowledge_time(
+                datetime(released_at.year, released_at.month, released_at.day)
             )
-            current.note(
-                release_id=release_id,
-                sha256=stored.sha256,
-                size_bytes=stored.size_bytes,
-                uploaded=stored.uploaded,
-            )
-            # A release is a fact that became knowable when it was published.
-            # Recording it here is what lets invariant 1 compare a later
-            # standardise run against the release it read.
-            if released_at is not None:
-                current.observed_knowledge_time(
-                    datetime(released_at.year, released_at.month, released_at.day)
-                )
-            run_id = current.id
+        run_id = current.id
 
     return IngestResult(
         release_id=release_id,

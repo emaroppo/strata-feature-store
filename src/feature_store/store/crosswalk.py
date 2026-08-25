@@ -105,100 +105,97 @@ def register(
     local = work / release["original_filename"]
     parquet_path = work / "crosswalk.parquet"
 
-    with engine.begin() as connection:
-        with open_run(
-            connection,
-            "register_crosswalk",
-            f"register crosswalk {name}",
-            {"crosswalk": name, "release_sha256": release["sha256"]},
-            s3=s3,
-            bucket=bucket,
-        ) as current:
-            current.read("release", release["id"], role="release")
-            objects.get_to_file(s3, bucket, release["object_key"], local)
+    with open_run(
+        engine,
+        "register_crosswalk",
+        f"register crosswalk {name}",
+        {"crosswalk": name, "release_sha256": release["sha256"]},
+        s3=s3,
+        bucket=bucket,
+    ) as current:
+        current.read("release", release["id"], role="release")
+        objects.get_to_file(s3, bucket, release["object_key"], local)
 
-            con = duck.connect(memory_limit="2GB")
-            con.execute(
-                f"CREATE TABLE cw AS SELECT "
-                f"CAST(source_id AS VARCHAR) AS source_id, "
-                f"CAST(target_id AS VARCHAR) AS target_id, "
-                f"CAST(valid_from AS DATE) AS valid_from, "
-                f"CAST(valid_to AS DATE) AS valid_to, "
-                f"CAST(confidence AS DOUBLE) AS confidence "
-                f"FROM read_csv('{local}', header=true)"
+        con = duck.connect(memory_limit="2GB")
+        con.execute(
+            f"CREATE TABLE cw AS SELECT "
+            f"CAST(source_id AS VARCHAR) AS source_id, "
+            f"CAST(target_id AS VARCHAR) AS target_id, "
+            f"CAST(valid_from AS DATE) AS valid_from, "
+            f"CAST(valid_to AS DATE) AS valid_to, "
+            f"CAST(confidence AS DOUBLE) AS confidence "
+            f"FROM read_csv('{local}', header=true)"
+        )
+        rows, sources = con.execute("SELECT count(*), count(DISTINCT source_id) FROM cw").fetchone()
+        if rows == 0:
+            raise CrosswalkError("the crosswalk is empty")
+
+        nulls = con.execute(
+            "SELECT count(*) FROM cw WHERE source_id IS NULL OR target_id IS NULL"
+        ).fetchone()[0]
+        if nulls:
+            raise CrosswalkError(f"{nulls} row(s) have a null source or target id")
+
+        offenders = _overlapping_targets(con, "cw")
+        if offenders:
+            raise CrosswalkError(
+                f"{len(offenders)} source id(s) map to more than one target over the same "
+                f"interval: {offenders[:5]}. One fact would become several, the row count "
+                "would grow, and nothing would report it. Express a succession with "
+                "non-overlapping date ranges, or leave the id unmapped."
             )
-            rows, sources = con.execute(
-                "SELECT count(*), count(DISTINCT source_id) FROM cw"
-            ).fetchone()
-            if rows == 0:
-                raise CrosswalkError("the crosswalk is empty")
 
-            nulls = con.execute(
-                "SELECT count(*) FROM cw WHERE source_id IS NULL OR target_id IS NULL"
-            ).fetchone()[0]
-            if nulls:
-                raise CrosswalkError(f"{nulls} row(s) have a null source or target id")
+        con.execute(
+            f"COPY (SELECT * FROM cw ORDER BY source_id, valid_from) "
+            f"TO '{parquet_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
+        digest, size = hash_file(str(parquet_path))
 
-            offenders = _overlapping_targets(con, "cw")
-            if offenders:
-                raise CrosswalkError(
-                    f"{len(offenders)} source id(s) map to more than one target over the same "
-                    f"interval: {offenders[:5]}. One fact would become several, the row count "
-                    "would grow, and nothing would report it. Express a succession with "
-                    "non-overlapping date ranges, or leave the id unmapped."
+        dataset_id = _ensure_dataset(current, name)
+        version_num = (
+            current.connection.execute(
+                sa.select(sa.func.coalesce(sa.func.max(dataset_version.c.version_num), 0)).where(
+                    dataset_version.c.dataset_id == dataset_id
                 )
-
-            con.execute(
-                f"COPY (SELECT * FROM cw ORDER BY source_id, valid_from) "
-                f"TO '{parquet_path}' (FORMAT PARQUET, COMPRESSION ZSTD)"
-            )
-            digest, size = hash_file(str(parquet_path))
-
-            dataset_id = _ensure_dataset(current, name)
-            version_num = (
-                current.connection.execute(
-                    sa.select(
-                        sa.func.coalesce(sa.func.max(dataset_version.c.version_num), 0)
-                    ).where(dataset_version.c.dataset_id == dataset_id)
-                ).scalar_one()
-                + 1
-            )
-            key = f"{CROSSWALK_PREFIX}/{name}/v{version_num}/part-{digest[:16]}.parquet"
-
-            s3.upload_file(
-                Filename=str(parquet_path),
-                Bucket=bucket,
-                Key=key,
-                ExtraArgs={"Metadata": {objects.SHA256_METADATA_KEY: digest}},
-            )
-            landed = objects.head(s3, bucket, key)
-            if landed["ContentLength"] != size:
-                raise CrosswalkError(f"upload of {key} did not land intact")
-
-            spec = {
-                "kind": "crosswalk",
-                "name": name,
-                "source": source["name"],
-                "release_sha256": release["sha256"],
-                "rows": rows,
-                "distinct_sources": sources,
-            }
-            version_id = current.connection.execute(
-                sa.insert(dataset_version)
-                .values(
-                    dataset_id=dataset_id,
-                    version_num=version_num,
-                    resolution_mode="materialized",
-                    spec=to_jsonable(spec),
-                    content_hash=digest,
-                    ingest_watermark=release["ingested_at"],
-                    object_prefix=key,
-                    created_by_run_id=current.id,
-                )
-                .returning(dataset_version.c.id)
             ).scalar_one()
-            current.wrote("dataset_version", version_id, role="crosswalk")
-            current.note(rows=rows, distinct_sources=sources, version=version_num)
+            + 1
+        )
+        key = f"{CROSSWALK_PREFIX}/{name}/v{version_num}/part-{digest[:16]}.parquet"
+
+        s3.upload_file(
+            Filename=str(parquet_path),
+            Bucket=bucket,
+            Key=key,
+            ExtraArgs={"Metadata": {objects.SHA256_METADATA_KEY: digest}},
+        )
+        landed = objects.head(s3, bucket, key)
+        if landed["ContentLength"] != size:
+            raise CrosswalkError(f"upload of {key} did not land intact")
+
+        spec = {
+            "kind": "crosswalk",
+            "name": name,
+            "source": source["name"],
+            "release_sha256": release["sha256"],
+            "rows": rows,
+            "distinct_sources": sources,
+        }
+        version_id = current.connection.execute(
+            sa.insert(dataset_version)
+            .values(
+                dataset_id=dataset_id,
+                version_num=version_num,
+                resolution_mode="materialized",
+                spec=to_jsonable(spec),
+                content_hash=digest,
+                ingest_watermark=release["ingested_at"],
+                object_prefix=key,
+                created_by_run_id=current.id,
+            )
+            .returning(dataset_version.c.id)
+        ).scalar_one()
+        current.wrote("dataset_version", version_id, role="crosswalk")
+        current.note(rows=rows, distinct_sources=sources, version=version_num)
 
     return CrosswalkVersion(
         dataset_id=dataset_id,
@@ -233,12 +230,16 @@ def resolve(connection: sa.Connection, name: str, version_num: int) -> dict[str,
         .first()
     )
     if row is None:
-        available = connection.execute(
-            sa.select(dataset_version.c.version_num)
-            .join(dataset, dataset.c.id == dataset_version.c.dataset_id)
-            .where(dataset.c.name == name)
-            .order_by(dataset_version.c.version_num)
-        ).scalars().all()
+        available = (
+            connection.execute(
+                sa.select(dataset_version.c.version_num)
+                .join(dataset, dataset.c.id == dataset_version.c.dataset_id)
+                .where(dataset.c.name == name)
+                .order_by(dataset_version.c.version_num)
+            )
+            .scalars()
+            .all()
+        )
         raise CrosswalkError(
             f"no crosswalk {name!r} at version {version_num}. "
             f"Available: {available or 'none - is it registered?'}"

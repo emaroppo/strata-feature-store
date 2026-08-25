@@ -92,11 +92,8 @@ def namespace_add(
     from feature_store.store.runs import run as open_run
 
     settings = _settings(config)
-    with _engine(settings).begin() as connection:
-        with open_run(connection, "ingest_release", f"namespace {name}", {"name": name}) as current:
-            catalog.ensure_namespace(
-                current, name, description=description, external_ref=external_ref
-            )
+    with open_run(_engine(settings), "ingest_release", f"namespace {name}", {"name": name}) as run:
+        catalog.ensure_namespace(run, name, description=description, external_ref=external_ref)
     console.print(f"[green]namespace[/green] {name}")
 
 

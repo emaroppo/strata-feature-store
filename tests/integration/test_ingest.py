@@ -71,12 +71,9 @@ def prepared(engine: sa.Engine, settings: Settings):
     """A registered source, on its own vocabulary, isolated per test."""
     name = f"src_{uuid.uuid4().hex[:8]}"
     namespace = f"{NAMESPACE}-{uuid.uuid4().hex[:8]}"
-    with engine.begin() as connection:
-        with open_run(connection, "ingest_release", "fixture", {}) as current:
-            catalog.ensure_namespace(current, namespace)
-            catalog.add_source(
-                current, name=name, native_namespace=namespace, granularity="annual"
-            )
+    with open_run(engine, "ingest_release", "fixture", {}) as current:
+        catalog.ensure_namespace(current, namespace)
+        catalog.add_source(current, name=name, native_namespace=namespace, granularity="annual")
     return name
 
 
@@ -125,8 +122,12 @@ class TestContentAddressing:
         )
         september = a_file("code,year,gdp\nAAA,2024,2.3\n", "indicators.csv")
         second = ingest.add_release(
-            engine, settings, path=september, source_name=prepared,
-            released_at=date(2024, 9, 30), s3=s3,
+            engine,
+            settings,
+            path=september,
+            source_name=prepared,
+            released_at=date(2024, 9, 30),
+            s3=s3,
         )
 
         assert first.sha256 != second.sha256
@@ -144,21 +145,26 @@ class TestContentAddressing:
         ingest.add_release(engine, settings, path=september, source_name=prepared, s3=s3)
 
         out = ingest.fetch_release(
-            engine, settings, digest_prefix=first.sha256[:10],
-            destination=tmp_path / "back.csv", s3=s3,
+            engine,
+            settings,
+            digest_prefix=first.sha256[:10],
+            destination=tmp_path / "back.csv",
+            s3=s3,
         )
         assert out.read_text().endswith("2.1\n"), "April's bytes, not September's"
 
 
 class TestTheReleaseRow:
-    def test_records_vintage_and_retrieval_separately(
-        self, engine, settings, prepared, a_file, s3
-    ):
+    def test_records_vintage_and_retrieval_separately(self, engine, settings, prepared, a_file, s3):
         """Conflating them makes every as-of query before today return nothing."""
         path = a_file("code,year,gdp\nAAA,2024,2.1\n")
         result = ingest.add_release(
-            engine, settings, path=path, source_name=prepared,
-            released_at=date(2024, 4, 15), s3=s3,
+            engine,
+            settings,
+            path=path,
+            source_name=prepared,
+            released_at=date(2024, 4, 15),
+            s3=s3,
         )
         with engine.begin() as connection:
             row = (
@@ -176,8 +182,12 @@ class TestTheReleaseRow:
         """What invariant 1 compares a later standardise run against."""
         path = a_file("code,year,gdp\nAAA,2024,2.1\n")
         result = ingest.add_release(
-            engine, settings, path=path, source_name=prepared,
-            released_at=date(2024, 4, 15), s3=s3,
+            engine,
+            settings,
+            path=path,
+            source_name=prepared,
+            released_at=date(2024, 4, 15),
+            s3=s3,
         )
         with engine.begin() as connection:
             known = connection.execute(
@@ -185,16 +195,12 @@ class TestTheReleaseRow:
             ).scalar_one()
         assert known.date() == date(2024, 4, 15)
 
-    def test_lineage_records_the_release_as_an_output(
-        self, engine, settings, prepared, a_file, s3
-    ):
+    def test_lineage_records_the_release_as_an_output(self, engine, settings, prepared, a_file, s3):
         path = a_file("code,year,gdp\nAAA,2024,2.1\n")
         result = ingest.add_release(engine, settings, path=path, source_name=prepared, s3=s3)
         with engine.begin() as connection:
             rows = connection.execute(
-                sa.text(
-                    "select ref_type, ref_id from run_output where run_id = :r"
-                ),
+                sa.text("select ref_type, ref_id from run_output where run_id = :r"),
                 {"r": result.run_id},
             ).all()
         assert ("release", result.release_id) in rows
@@ -204,8 +210,12 @@ class TestTheReleaseRow:
 
         path = a_file("code,year,gdp\nAAA,2024,2.1\n")
         result = ingest.add_release(
-            engine, settings, path=path, source_name=prepared,
-            released_at=date(2024, 4, 15), s3=s3,
+            engine,
+            settings,
+            path=path,
+            source_name=prepared,
+            released_at=date(2024, 4, 15),
+            s3=s3,
         )
         with engine.begin() as connection:
             key = connection.execute(
@@ -226,15 +236,21 @@ class TestRefusals:
     def test_a_source_cannot_be_registered_twice(self, engine, settings, prepared):
         with pytest.raises(catalog.CatalogError, match="already exists"):
             ingest.register_source(
-                engine, settings, name=prepared,
-                native_namespace="whatever", granularity="annual",
+                engine,
+                settings,
+                name=prepared,
+                native_namespace="whatever",
+                granularity="annual",
             )
 
     def test_a_source_needs_a_registered_vocabulary(self, engine, settings):
         with pytest.raises(catalog.CatalogError, match="not registered"):
             ingest.register_source(
-                engine, settings, name=f"s_{uuid.uuid4().hex[:6]}",
-                native_namespace="never-registered", granularity="annual",
+                engine,
+                settings,
+                name=f"s_{uuid.uuid4().hex[:6]}",
+                native_namespace="never-registered",
+                granularity="annual",
             )
 
     def test_fetching_an_unknown_digest_says_so(self, engine, settings, tmp_path):
