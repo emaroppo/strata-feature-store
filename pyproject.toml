@@ -54,3 +54,11 @@ src = ["src", "tests"]
 [tool.ruff.lint]
 # Pinned: ruff's default set widens between releases.
 select = ["E", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Alembic writes these, and it emits table and column comments as single long
+# string literals that no formatter can split. Rewrapping them by hand after
+# every autogenerate is the kind of friction that gets skipped once and then
+# always, so the line limit is lifted here and nowhere else. Everything except
+# line length still applies.
+"src/feature_store/store/migrations/versions/*" = ["E501"]
