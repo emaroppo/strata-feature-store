@@ -78,6 +78,18 @@ def client(settings: StorageSettings):
         config=BotoConfig(
             s3={"addressing_style": settings.addressing_style},
             retries={"max_attempts": 5, "mode": "standard"},
+            # botocore 1.36+ validates a flexible checksum on every response by
+            # default, and computes it over multipart downloads in a way
+            # S3-compatible stores do not reproduce. The result is a
+            # FlexibleChecksumError on a file that arrived perfectly intact, and
+            # only on files large enough to be fetched in parts — so it passes
+            # every small test and fails on the first real one.
+            #
+            # Turning it off costs nothing here: every object this store reads
+            # back is verified against the sha256 in its own key, which is a
+            # stronger check than the one being skipped.
+            response_checksum_validation="when_required",
+            request_checksum_calculation="when_required",
         ),
     )
 

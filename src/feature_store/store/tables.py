@@ -53,7 +53,9 @@ metadata = MetaData(
 )
 
 SOURCE_KINDS = ("panel", "crosswalk")
-DATASET_KINDS = ("composed",)
+# A crosswalk is a frozen, version-pinned collection like any other, so it lives
+# here rather than in a table of its own.
+DATASET_KINDS = ("composed", "crosswalk")
 RESOLUTION_MODES = ("query", "materialized")
 TIME_BASES = ("ingest_fallback", "modeled_lag", "file_release", "publisher_timestamp")
 GRANULARITIES = ("annual", "quarterly", "monthly", "weekly", "daily", "irregular")
@@ -172,6 +174,12 @@ feature_group = Table(
     # query time by the COALESCE that derives knowledge_time, so it has to be
     # typed and constrained rather than fished out.
     Column("declared_lag", String(16)),
+    # Measure the lag from the end of this period rather than from the raw event
+    # date. A publisher releasing annually publishes January and December of one
+    # year in the same file; lagging each event date separately would claim they
+    # became knowable a year apart, which is false in a way that silently shifts
+    # an entire backtest.
+    Column("lag_anchor_period", String(16)),
     Column("period_anchor", String(8), nullable=False, server_default="end"),
     # Whether this publisher's nulls withdraw a value or merely mean "not
     # reported this cycle". Opposite meanings that the format cannot tell
@@ -209,6 +217,13 @@ feature = Table(
     Column("dtype", String(8), nullable=False),
     Column("unit", Text),
     Column("description", Text),
+    # What the name says about the feature: its base quantity, the scale it is
+    # expressed on, which summary statistic it is. Read out of the name by a
+    # declared suffix grammar, so the store knows nothing about any particular
+    # publisher. With thousands of names in a group this is what makes "the
+    # point estimates" selectable without listing them all or matching suffixes
+    # by hand -- and two-part suffixes make hand-matching wrong.
+    Column("meta", JSONB),
     Column("created_by_run_id", ForeignKey("run.id"), nullable=False),
     Column("deprecated_at", DateTime),
     UniqueConstraint("feature_group_id", "name"),

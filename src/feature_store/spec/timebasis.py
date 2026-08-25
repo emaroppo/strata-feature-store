@@ -45,11 +45,31 @@ def is_upgrade(old: TimeBasis, new: TimeBasis) -> bool:
     return FIDELITY.index(new) > FIDELITY.index(old)
 
 
+#: DuckDB's date_trunc unit, and how long the truncated period runs, per period.
+_TRUNC: Final[dict[str, tuple[str, str]]] = {
+    "annual": ("year", "INTERVAL 1 YEAR - INTERVAL 1 DAY"),
+    "quarterly": ("quarter", "INTERVAL 3 MONTH - INTERVAL 1 DAY"),
+    "monthly": ("month", "INTERVAL 1 MONTH - INTERVAL 1 DAY"),
+    "weekly": ("week", "INTERVAL 6 DAY"),
+}
+
+
+def period_end_sql(column: str, period: str) -> str:
+    """SQL for the last day of the *period* containing *column*."""
+    if period not in _TRUNC:
+        raise ValueError(
+            f"cannot anchor a lag to period {period!r}; expected one of {sorted(_TRUNC)}"
+        )
+    unit, span = _TRUNC[period]
+    return f"(date_trunc('{unit}', {column}) + {span})"
+
+
 def knowledge_time_sql(
     basis: TimeBasis,
     declared_lag: Duration | None = None,
     *,
     table: str | None = None,
+    lag_anchor_period: str | None = None,
 ) -> str:
     """The SQL expression that resolves knowledge_time for a group.
 
@@ -81,7 +101,18 @@ def knowledge_time_sql(
         return stored
     if declared_lag is None:
         raise ValueError("a 'modeled_lag' group must declare a lag; there is nothing to derive")
-    return f"COALESCE({stored}, {prefix}{EVENT_TIME} + {interval_sql(declared_lag)})"
+
+    # The lag runs from the end of the publication period, not from the raw
+    # event date, whenever a publisher releases on a cycle. A source that emits
+    # a row on 1 January and another on 31 December of the same year published
+    # both in the same release; measuring the lag from each event date
+    # separately would claim they became knowable a year apart, which is false
+    # in a way that quietly shifts an entire backtest.
+    if lag_anchor_period:
+        from_point = period_end_sql(f"{prefix}{EVENT_TIME}", lag_anchor_period)
+    else:
+        from_point = f"{prefix}{EVENT_TIME}"
+    return f"COALESCE({stored}, {from_point} + {interval_sql(declared_lag)})"
 
 
 def interval_sql(duration: Duration) -> str:

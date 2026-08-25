@@ -253,6 +253,100 @@ def release_get(
     console.print(f"[green]wrote[/green] {written}")
 
 
+@app.command("crosswalk")
+def crosswalk_register(
+    name: str = typer.Argument(..., help="Name specs will pin, e.g. vdem_to_iso3."),
+    release: str = typer.Argument(..., help="Release digest of the crosswalk file."),
+    config: Path | None = typer.Option(None),
+) -> None:
+    """Freeze a crosswalk release as a pinned version.
+
+    The one-to-one check runs here, so a version that exists is safe to use.
+    """
+    from feature_store.store import crosswalk as cw
+
+    settings = _settings(config)
+    try:
+        result = cw.register(_engine(settings), settings, name=name, digest_prefix=release)
+    except cw.CrosswalkError as exc:
+        _fail(str(exc))
+    console.print(
+        f"[green]crosswalk[/green] {name} v{result.version_num}  "
+        f"{result.rows:,} rows, {result.distinct_sources:,} distinct source ids\n"
+        f"  key {result.object_key}",
+        soft_wrap=True,
+    )
+
+
+@app.command("standardise")
+def standardise_cmd(
+    # --spec rather than --config: every other command uses --config for
+    # config.toml, and one flag meaning two things is how the wrong file gets
+    # passed on a tired evening.
+    config_file: Path = typer.Option(..., "--spec", exists=True, help="Standardisation config."),
+    release: str = typer.Argument(..., help="Release digest, or an unambiguous prefix."),
+    set_: list[str] = typer.Option(
+        [], "--set", help="Override a config field, as dotted.path=value. Repeatable."
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Count and validate, write nothing."),
+    memory_limit: str = typer.Option("8GB", help="DuckDB memory limit before it spills."),
+    work_dir: Path | None = typer.Option(None, help="Where to stage and spill. Needs room."),
+    config: Path | None = typer.Option(None, help="Path to config.toml."),
+) -> None:
+    """Turn one release into long-format facts."""
+    import json
+
+    from feature_store.store import standardise as std
+
+    overrides: dict[str, object] = {}
+    for item in set_:
+        if "=" not in item:
+            _fail(f"--set expects dotted.path=value, got {item!r}")
+        key, _, raw = item.partition("=")
+        try:
+            overrides[key] = json.loads(raw)
+        except json.JSONDecodeError:
+            overrides[key] = raw
+
+    settings = _settings(config)
+    try:
+        spec = std.load_spec(config_file, overrides)
+    except Exception as exc:
+        _fail(f"{config_file}: {exc}")
+
+    try:
+        result = std.standardise(
+            _engine(settings),
+            settings,
+            spec,
+            digest_prefix=release,
+            work_dir=work_dir,
+            memory_limit=memory_limit,
+            dry_run=dry_run,
+        )
+    except (std.StandardiseError, Exception) as exc:
+        if isinstance(exc, std.StandardiseError):
+            _fail(str(exc))
+        raise
+
+    if dry_run:
+        console.print(
+            f"[yellow]dry run[/yellow]  {result.rows_written:,} facts from "
+            f"{result.features_registered:,} columns. Nothing written."
+        )
+        return
+    verb = "reused" if result.reused_existing else "wrote"
+    console.print(
+        f"[green]{verb}[/green] {result.rows_written:,} facts, "
+        f"{result.features_registered:,} features registered\n"
+        f"  group     {spec.feature_group} (id {result.feature_group_id})\n"
+        f"  partition {result.partition_id}\n"
+        f"  key       {result.object_key}\n"
+        f"  run       {result.run_id}",
+        soft_wrap=True,
+    )
+
+
 @runs_app.command("ls")
 def runs_ls(
     limit: int = typer.Option(20),

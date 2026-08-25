@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "feature_group": "vdem_cd",
+  "source": "vdem_cd",
+  "description": "Country-date panel. Each country-year carries a 01-01 and a 12-31 row plus a row on any date a value changed, so the granularity is irregular rather than annual even though publication is annual.",
+  "retraction_policy": "ignore",
+  "reader": {
+    "format": "csv",
+    "options": {}
+  },
+  "layout": "wide",
+  "entity": {
+    "column": "country_text_id",
+    "normalise": [
+      "strip",
+      "upper"
+    ],
+    "drop_if_null": true
+  },
+  "event_time": {
+    "column": "historical_date",
+    "format": "%Y-%m-%d",
+    "period": "irregular",
+    "anchor": "end"
+  },
+  "knowledge_time": {
+    "basis": "modeled_lag",
+    "declared_lag": "P2M12D",
+    "lag_anchor_period": "annual",
+    "rationale": "Publication is annual, in March, covering through the previous calendar year. v15 was released 2025-03-12 and carries data through 2024, so a lag measured from the end of the event's calendar year reproduces that date exactly for 2024 and extrapolates consistently backwards. The lag is anchored to the year rather than the event date because the 01-01 and 12-31 rows of one year were published together; lagging each separately would claim they became knowable a year apart. This is a counterfactual for years before the project existed: it models when an equivalent measurement would have been available, not when this estimate was first published. Fidelity is therefore modeled_lag, and per-version release dates would be an upgrade to file_release."
+  },
+  "features": {
+    "exclude": [
+      "COWcode",
+      "codingend",
+      "codingend_contemp",
+      "codingend_hist",
+      "codingstart",
+      "codingstart_contemp",
+      "codingstart_hist",
+      "country_id",
+      "country_name",
+      "gap_index",
+      "gapend1",
+      "gapend2",
+      "gapend3",
+      "gapstart1",
+      "gapstart2",
+      "gapstart3",
+      "histname",
+      "historical",
+      "project",
+      "v2ellocnam",
+      "v2elregnam",
+      "v2exnamhog",
+      "v2exnamhos",
+      "v2exparhos",
+      "v2expothog",
+      "v2extithog",
+      "v2extithos",
+      "v2juhcname",
+      "v2lgnamelo",
+      "v2lgnameup",
+      "v2lpname",
+      "v2reginfo",
+      "v2slpname",
+      "v2tlpname",
+      "v3ellocnam",
+      "v3elregnam",
+      "v3exnamhog",
+      "v3exnamhos",
+      "v3extithog",
+      "v3extithos",
+      "v3juhcname",
+      "v3lgcamoth",
+      "v3lgnamelo",
+      "v3lgnameup",
+      "year"
+    ],
+    "name": {
+      "source": "column_name",
+      "allow_unlisted": true
+    },
+    "kind": "numeric",
+    "meta": {
+      "suffixes": [
+        {
+          "suffix": "_codelow",
+          "statistic": "ci_low"
+        },
+        {
+          "suffix": "_codehigh",
+          "statistic": "ci_high"
+        },
+        {
+          "suffix": "_sd",
+          "statistic": "sd"
+        },
+        {
+          "suffix": "_mean",
+          "statistic": "raw_mean",
+          "scale": "raw"
+        },
+        {
+          "suffix": "_nr",
+          "statistic": "coder_count",
+          "scale": "raw"
+        },
+        {
+          "suffix": "_osp",
+          "scale": "original"
+        },
+        {
+          "suffix": "_ord",
+          "scale": "ordinal"
+        }
+      ],
+      "default_scale": "latent",
+      "default_statistic": "point"
+    }
+  },
+  "crosswalk": {
+    "dataset": "vdem_to_iso3",
+    "version": 1
+  }
+}

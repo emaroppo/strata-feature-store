@@ -61,4 +61,7 @@ select = ["E", "F", "I"]
 # every autogenerate is the kind of friction that gets skipped once and then
 # always, so the line limit is lifted here and nowhere else. Everything except
 # line length still applies.
-"src/feature_store/store/migrations/versions/*" = ["E501"]
+# F401: the template always imports op and sa. A migration whose body is empty
+# has them unused, ruff --fix strips them, and the next hand-edit that needs op
+# fails with a NameError at migration time rather than at lint time.
+"src/feature_store/store/migrations/versions/*" = ["E501", "F401"]
