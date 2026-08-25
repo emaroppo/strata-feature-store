@@ -1,0 +1,17 @@
+# Local data. Source files belong in the object store, not in git.
+*.csv
+*.parquet
+*.zip
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Secrets and machine-local locations
+.env
+config.toml
