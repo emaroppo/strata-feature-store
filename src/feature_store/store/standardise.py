@@ -28,7 +28,7 @@ from typing import Any
 import sqlalchemy as sa
 
 from feature_store.spec import schema as long_schema
-from feature_store.spec.canonical import hash_file, short_hash, to_jsonable
+from feature_store.spec.canonical import content_hash, hash_file, short_hash, to_jsonable
 from feature_store.spec.periods import UNBOUNDED
 from feature_store.spec.standardise import StandardiseSpec, decompose
 from feature_store.store import catalog, duck, objects
@@ -233,11 +233,12 @@ def _register_features(run: Run, group_id: int, names: list[str], spec: Standard
         )
     if not rows:
         return 0
-    run.connection.execute(
-        pg_insert(feature)
-        .values(rows)
-        .on_conflict_do_nothing(index_elements=["feature_group_id", "name"])
-    )
+    with run.transaction() as connection:
+        connection.execute(
+            pg_insert(feature)
+            .values(rows)
+            .on_conflict_do_nothing(index_elements=["feature_group_id", "name"])
+        )
     return len(rows)
 
 
@@ -249,14 +250,17 @@ def _ensure_group(
     group_name: str | None = None,
 ) -> int:
     group_name = group_name or spec.feature_group
-    existing = (
-        run.connection.execute(sa.select(feature_group).where(feature_group.c.name == group_name))
-        .mappings()
-        .first()
-    )
-    if existing is not None:
-        return existing["id"]
-    return run.connection.execute(
+    with run.transaction() as connection:
+        existing = (
+            connection.execute(
+                sa.select(feature_group).where(feature_group.c.name == group_name)
+            )
+            .mappings()
+            .first()
+        )
+        if existing is not None:
+            return existing["id"]
+        return connection.execute(
         sa.insert(feature_group)
         .values(
             name=group_name,
@@ -299,6 +303,33 @@ def _source_relation(source_path: str) -> str:
     return f"read_csv('{source_path}', header=true, all_varchar=true, sample_size=-1)"
 
 
+def _existing_part(run: Run, group_id: int, input_hash: str) -> dict[str, Any] | None:
+    """A live partition already produced by this exact work, if there is one.
+
+    Matched on the input fingerprint rather than the output digest, and only
+    among partitions whose creating run finished — a part left behind by a run
+    that died is not evidence the work was done.
+    """
+    from feature_store.store.tables import run as run_table
+
+    with run.transaction() as connection:
+        row = (
+            connection.execute(
+                sa.select(feature_partition)
+                .join(run_table, run_table.c.id == feature_partition.c.created_by_run_id)
+                .where(
+                    feature_partition.c.feature_group_id == group_id,
+                    feature_partition.c.superseded_by_run_id.is_(None),
+                    run_table.c.status == "ok",
+                    feature_partition.c.partition_values["input_hash"].astext == input_hash,
+                )
+            )
+            .mappings()
+            .first()
+        )
+    return dict(row) if row else None
+
+
 @dataclass(frozen=True, slots=True)
 class WrittenPart:
     partition_id: int
@@ -318,8 +349,22 @@ def _write_part(
     s3,
     bucket: str,
     role: str,
+    input_hash: str,
 ) -> WrittenPart | None:
-    """Sort one view into parquet, put it in the bucket, then record it."""
+    """Sort one view into parquet, put it in the bucket, then record it.
+
+    Idempotence is keyed on the *inputs* — this release, this config, this batch
+    — rather than on the bytes produced. Every fact carries an ``ingest_time``,
+    so re-standardising identical data produces a different file with a
+    different digest, and a content-addressed check would never match. What
+    "already done" means here is that the same work was done, not that the same
+    bytes came out.
+    """
+    existing = _existing_part(current, group_id, input_hash)
+    if existing is not None:
+        current.wrote("feature_partition", existing["id"], role=role)
+        return WrittenPart(existing["id"], existing["object_key"], existing["row_count"])
+
     rows = con.execute(f"SELECT count(*) FROM {view}").fetchone()[0]
     if rows == 0:
         return None
@@ -332,17 +377,6 @@ def _write_part(
     )
     digest, size = hash_file(str(parquet_path))
     key = f"{FEATURES_PREFIX}/{group_name}/entity_namespace={namespace}/part-{digest[:16]}.parquet"
-
-    existing = (
-        current.connection.execute(
-            sa.select(feature_partition).where(feature_partition.c.object_key == key)
-        )
-        .mappings()
-        .first()
-    )
-    if existing is not None:
-        current.wrote("feature_partition", existing["id"], role=role)
-        return WrittenPart(existing["id"], key, rows)
 
     # Bytes first, verified, then the catalog row.
     s3.upload_file(
@@ -362,7 +396,8 @@ def _write_part(
         f"min(feature_name), max(feature_name) FROM {view}"
     ).fetchone()
 
-    partition_id = current.connection.execute(
+    with current.transaction() as connection:
+        partition_id = connection.execute(
         sa.insert(feature_partition)
         .values(
             feature_group_id=group_id,
@@ -374,6 +409,7 @@ def _write_part(
             # opening it, which is the point of batching by column.
             partition_values={
                 "entity_namespace": namespace,
+                "input_hash": input_hash,
                 "feature_min": bounds[4],
                 "feature_max": bounds[5],
             },
@@ -535,6 +571,17 @@ def standardise(
                     s3=s3,
                     bucket=bucket,
                     role=role,
+                    # This release, this config, this batch. Identical work is
+                    # already done; identical *bytes* never happen, because
+                    # every fact carries the time it was ingested.
+                    input_hash=content_hash(
+                        {
+                            "config": params,
+                            "release": release["sha256"],
+                            "group": group_name,
+                            "batch": index,
+                        }
+                    ),
                 )
                 if part is None:
                     continue
@@ -611,18 +658,25 @@ def load_spec(path: str | Path, overrides: dict[str, Any] | None = None) -> Stan
 def check_granularity(con, spec: StandardiseSpec, granularity: str) -> int:
     """Invariant 11: event times must land on the source's declared boundary.
 
-    A wrong anchor shifts every derived knowledge_time by up to a period, in a
-    direction that is half the time the dangerous one.
+    A wrong anchor shifts every derived knowledge_time by up to a period, and
+    half the time in the direction that hands a backtest data it could not have
+    had.
+
+    Both anchors are checked. An earlier version returned zero for
+    ``start`` without looking, which meant a start-anchored source was never
+    validated at all — the check existed, passed, and proved nothing.
     """
     if granularity in UNBOUNDED:
         return 0
-    from feature_store.spec.timebasis import period_end_sql
+    from feature_store.spec.timebasis import period_end_sql, period_start_sql
 
-    anchored = period_end_sql("event_time", granularity)
-    if spec.event_time.anchor == "start":
-        return 0
+    boundary = (
+        period_start_sql("event_time", granularity)
+        if spec.event_time.anchor == "start"
+        else period_end_sql("event_time", granularity)
+    )
     return con.execute(
-        f"SELECT count(*) FROM facts WHERE event_time <> ({anchored})::DATE"
+        f"SELECT count(*) FROM facts WHERE event_time <> ({boundary})::DATE"
     ).fetchone()[0]
 
 

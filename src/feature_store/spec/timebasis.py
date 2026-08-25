@@ -64,6 +64,14 @@ def period_end_sql(column: str, period: str) -> str:
     return f"(date_trunc('{unit}', {column}) + {span})"
 
 
+def period_start_sql(column: str, period: str) -> str:
+    """SQL for the first day of the *period* containing *column*."""
+    if period not in _TRUNC:
+        raise ValueError(f"cannot anchor to period {period!r}; expected one of {sorted(_TRUNC)}")
+    unit, _ = _TRUNC[period]
+    return f"date_trunc('{unit}', {column})"
+
+
 def knowledge_time_sql(
     basis: TimeBasis,
     declared_lag: Duration | None = None,

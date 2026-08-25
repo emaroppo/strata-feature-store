@@ -101,3 +101,51 @@ def connection(engine: sa.Engine):
             yield conn
         finally:
             transaction.rollback()
+
+
+# --------------------------------------------------------------------------
+# object store
+
+
+@pytest.fixture(scope="session")
+def storage_settings():
+    """The throwaway container, never a shared instance.
+
+    These tests create and delete objects. Aiming that at a store holding real
+    sources is one environment variable away, so the default is local and any
+    override has to be deliberate.
+    """
+    from feature_store.store import objects
+    from feature_store.store.config import StorageSettings
+
+    made = StorageSettings(
+        endpoint_url=os.environ.get("FEATURE_STORE_TEST_S3_ENDPOINT", "http://localhost:3900"),
+        bucket=os.environ.get("FEATURE_STORE_TEST_BUCKET", "feature-store"),
+        region="garage",
+        addressing_style="path",
+    )
+    if not os.environ.get("FEATURE_STORE_S3_ACCESS_KEY"):
+        pytest.skip("FEATURE_STORE_S3_ACCESS_KEY is not set; no object store to test against")
+    try:
+        objects.client(made).head_bucket(Bucket=made.bucket)
+    except Exception as exc:  # pragma: no cover - depends on the host
+        pytest.skip(f"no object store at {made.endpoint_url}: {exc}")
+    return made
+
+
+@pytest.fixture
+def s3(storage_settings):
+    from feature_store.store import objects
+
+    return objects.client(storage_settings)
+
+
+@pytest.fixture
+def settings(migrated_database_url: str, storage_settings):
+    from feature_store.store.config import CatalogSettings, Settings
+
+    return Settings(
+        catalog=CatalogSettings(url=migrated_database_url),
+        storage=storage_settings,
+        canonical_namespace="iso3166-1-alpha3",
+    )

@@ -8,7 +8,6 @@ known to have landed.
 
 from __future__ import annotations
 
-import os
 import uuid
 from datetime import date
 
@@ -16,7 +15,6 @@ import pytest
 import sqlalchemy as sa
 
 from feature_store.store import catalog, ingest, objects
-from feature_store.store.config import Settings, StorageSettings
 from feature_store.store.runs import run as open_run
 from feature_store.store.tables import release as release_table
 from feature_store.store.tables import run as run_table
@@ -26,48 +24,8 @@ pytestmark = pytest.mark.integration
 NAMESPACE = "test-vocab"
 
 
-@pytest.fixture(scope="session")
-def storage_settings() -> StorageSettings:
-    """Points at the throwaway container, never at a shared instance.
-
-    These tests write objects and would happily delete them. Aiming that at a
-    store holding real sources is one environment variable away, so the default
-    is local and the override is explicit.
-    """
-    settings = StorageSettings(
-        endpoint_url=os.environ.get("FEATURE_STORE_TEST_S3_ENDPOINT", "http://localhost:3900"),
-        bucket=os.environ.get("FEATURE_STORE_TEST_BUCKET", "feature-store"),
-        region="garage",
-        addressing_style="path",
-    )
-    if not os.environ.get("FEATURE_STORE_S3_ACCESS_KEY"):
-        pytest.skip("FEATURE_STORE_S3_ACCESS_KEY is not set; no object store to test against")
-    try:
-        client = objects.client(settings)
-        client.head_bucket(Bucket=settings.bucket)
-    except Exception as exc:  # pragma: no cover - depends on the host
-        pytest.skip(f"no object store at {settings.endpoint_url}: {exc}")
-    return settings
-
-
 @pytest.fixture
-def s3(storage_settings: StorageSettings):
-    return objects.client(storage_settings)
-
-
-@pytest.fixture
-def settings(migrated_database_url: str, storage_settings: StorageSettings) -> Settings:
-    from feature_store.store.config import CatalogSettings
-
-    return Settings(
-        catalog=CatalogSettings(url=migrated_database_url),
-        storage=storage_settings,
-        canonical_namespace="iso3166-1-alpha3",
-    )
-
-
-@pytest.fixture
-def prepared(engine: sa.Engine, settings: Settings):
+def prepared(engine: sa.Engine, settings):
     """A registered source, on its own vocabulary, isolated per test."""
     name = f"src_{uuid.uuid4().hex[:8]}"
     namespace = f"{NAMESPACE}-{uuid.uuid4().hex[:8]}"

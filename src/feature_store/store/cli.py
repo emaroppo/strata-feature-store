@@ -311,20 +311,42 @@ def standardise_cmd(
     except Exception as exc:
         _fail(f"{config_file}: {exc}")
 
+    # A melt of a few hundred million facts runs for minutes with nothing to
+    # show for it. Progress goes to stderr so redirecting stdout still gets a
+    # clean result line.
+    from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
+
+    bar = Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("{task.completed}/{task.total} batches"),
+        TextColumn("[dim]{task.fields[facts]}[/dim]"),
+        TimeElapsedColumn(),
+        console=err,
+        transient=True,
+    )
+    task = None
+
+    def on_progress(done: int, total: int, facts: int) -> None:
+        nonlocal task
+        if task is None:
+            task = bar.add_task(spec.feature_group, total=total, facts="")
+        bar.update(task, completed=done, facts=f"{facts:,} facts")
+
     try:
-        result = std.standardise(
-            _engine(settings),
-            settings,
-            spec,
-            digest_prefix=release,
-            work_dir=work_dir,
-            memory_limit=memory_limit,
-            dry_run=dry_run,
-        )
-    except (std.StandardiseError, Exception) as exc:
-        if isinstance(exc, std.StandardiseError):
-            _fail(str(exc))
-        raise
+        with bar:
+            result = std.standardise(
+                _engine(settings),
+                settings,
+                spec,
+                digest_prefix=release,
+                work_dir=work_dir,
+                memory_limit=memory_limit,
+                dry_run=dry_run,
+                progress=on_progress,
+            )
+    except std.StandardiseError as exc:
+        _fail(str(exc))
 
     if dry_run:
         console.print(

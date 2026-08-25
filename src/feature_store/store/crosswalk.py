@@ -152,14 +152,15 @@ def register(
         digest, size = hash_file(str(parquet_path))
 
         dataset_id = _ensure_dataset(current, name)
-        version_num = (
-            current.connection.execute(
-                sa.select(sa.func.coalesce(sa.func.max(dataset_version.c.version_num), 0)).where(
-                    dataset_version.c.dataset_id == dataset_id
-                )
-            ).scalar_one()
-            + 1
-        )
+        with current.transaction() as connection:
+            version_num = (
+                connection.execute(
+                    sa.select(
+                        sa.func.coalesce(sa.func.max(dataset_version.c.version_num), 0)
+                    ).where(dataset_version.c.dataset_id == dataset_id)
+                ).scalar_one()
+                + 1
+            )
         key = f"{CROSSWALK_PREFIX}/{name}/v{version_num}/part-{digest[:16]}.parquet"
 
         s3.upload_file(
@@ -180,20 +181,21 @@ def register(
             "rows": rows,
             "distinct_sources": sources,
         }
-        version_id = current.connection.execute(
-            sa.insert(dataset_version)
-            .values(
-                dataset_id=dataset_id,
-                version_num=version_num,
-                resolution_mode="materialized",
-                spec=to_jsonable(spec),
-                content_hash=digest,
-                ingest_watermark=release["ingested_at"],
-                object_prefix=key,
-                created_by_run_id=current.id,
-            )
-            .returning(dataset_version.c.id)
-        ).scalar_one()
+        with current.transaction() as connection:
+            version_id = connection.execute(
+                sa.insert(dataset_version)
+                .values(
+                    dataset_id=dataset_id,
+                    version_num=version_num,
+                    resolution_mode="materialized",
+                    spec=to_jsonable(spec),
+                    content_hash=digest,
+                    ingest_watermark=release["ingested_at"],
+                    object_prefix=key,
+                    created_by_run_id=current.id,
+                )
+                .returning(dataset_version.c.id)
+            ).scalar_one()
         current.wrote("dataset_version", version_id, role="crosswalk")
         current.note(rows=rows, distinct_sources=sources, version=version_num)
 
@@ -208,14 +210,15 @@ def register(
 
 
 def _ensure_dataset(run: Run, name: str) -> int:
-    existing = run.connection.execute(
-        sa.select(dataset.c.id).where(dataset.c.name == name)
-    ).scalar_one_or_none()
-    if existing is not None:
-        return existing
-    return run.connection.execute(
-        sa.insert(dataset).values(name=name, kind="crosswalk").returning(dataset.c.id)
-    ).scalar_one()
+    with run.transaction() as connection:
+        existing = connection.execute(
+            sa.select(dataset.c.id).where(dataset.c.name == name)
+        ).scalar_one_or_none()
+        if existing is not None:
+            return existing
+        return connection.execute(
+            sa.insert(dataset).values(name=name, kind="crosswalk").returning(dataset.c.id)
+        ).scalar_one()
 
 
 def resolve(connection: sa.Connection, name: str, version_num: int) -> dict[str, Any]:
