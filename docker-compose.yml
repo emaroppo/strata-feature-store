@@ -9,7 +9,9 @@ services:
       POSTGRES_PASSWORD: feature_store
       POSTGRES_DB: feature_store
     ports:
-      - "5432:5432"
+      # 5432 and 5433 are taken by neighbouring projects on this host.
+      # The container port is untouched; only the host mapping moves.
+      - "5434:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U feature_store"]
       interval: 2s
@@ -28,9 +30,11 @@ services:
       - "3900:3900"
       - "3903:3903"
     healthcheck:
-      # Garage answers on the admin port before it will accept writes; the
-      # layout still has to be applied. scripts/garage-bootstrap.sh does that.
-      test: ["CMD-SHELL", "/garage status || exit 1"]
+      # Exec form, not CMD-SHELL: this image has no shell to run one in.
+      # Note that passing here means garage is answering, NOT that it will
+      # accept writes - a node with no layout answers happily and refuses
+      # every PUT. scripts/garage-bootstrap.sh is what closes that gap.
+      test: ["CMD", "/garage", "status"]
       interval: 2s
       timeout: 3s
       retries: 30

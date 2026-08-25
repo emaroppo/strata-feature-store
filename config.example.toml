@@ -4,7 +4,7 @@
 [catalog]
 # The Postgres holding descriptions, pointers and lineage. No feature values
 # ever land here.
-url = "postgresql+psycopg://feature_store@localhost:5432/feature_store"
+url = "postgresql+psycopg://feature_store@localhost:5434/feature_store"
 
 [storage]
 # Garage, or any S3-compatible endpoint. boto3 wants a scheme here; DuckDB
