@@ -118,11 +118,17 @@ release = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("source_id", ForeignKey("source.id"), nullable=False),
-    # Content-addressed, and unique across the store. Publishers reuse filenames
-    # across vintages constantly; keying on the name would let September's
-    # download silently overwrite April's, after which no earlier
-    # standardisation is reproducible and nothing records that it happened.
-    Column("sha256", String(64), nullable=False, unique=True),
+    # Content-addressed. Publishers reuse filenames across vintages constantly;
+    # keying on the name would let September's download silently overwrite
+    # April's, after which no earlier standardisation is reproducible and
+    # nothing records that it happened.
+    #
+    # Unique per source rather than globally: the bytes dedupe to one object in
+    # the store either way, but a release is a fact about a *product*, and two
+    # publishers distributing an identical file is unusual rather than illegal.
+    # A global constraint would refuse the second one with an error about
+    # ownership, which is a strange thing for a store to have an opinion about.
+    Column("sha256", String(64), nullable=False),
     Column("object_key", Text, nullable=False),
     Column("size_bytes", Integer, nullable=False),
     Column("original_filename", Text, nullable=False),
@@ -140,7 +146,9 @@ release = Table(
     # so lineage still resolves and the file is still identifiable.
     Column("pruned_at", DateTime),
     Column("meta", JSONB),
+    UniqueConstraint("source_id", "sha256"),
     Index("ix_release_source", "source_id"),
+    Index("ix_release_sha256", "sha256"),
     comment="One file exactly as downloaded, before anything decided what it means.",
 )
 

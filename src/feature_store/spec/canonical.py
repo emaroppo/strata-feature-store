@@ -75,6 +75,21 @@ def canonical_bytes(payload: Any) -> bytes:
     return canonical_json(payload).encode("utf-8")
 
 
+def to_jsonable(payload: Any) -> Any:
+    """*payload* reduced to plain JSON types, via the canonical form.
+
+    Use this before handing anything to a JSONB column. A database driver
+    serialises with its own ``json.dumps``, which knows nothing about dates and
+    raises on the first one — and a config that carries a release date is the
+    normal case, not an edge case.
+
+    Going through the canonical form rather than a bespoke converter buys a
+    property worth having: what gets stored is byte-for-byte what got hashed, so
+    a ``config_hash`` can always be recomputed from the row it describes.
+    """
+    return json.loads(canonical_json(payload))
+
+
 def content_hash(payload: Any) -> str:
     """The sha256 of *payload*'s canonical form, hex, full length.
 

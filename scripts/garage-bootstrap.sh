@@ -29,13 +29,21 @@ g status >/dev/null 2>&1 || { echo "garage never came up" >&2; exit 1; }
 NODE_ID="$(g node id -q 2>/dev/null | cut -d@ -f1)"
 echo "==> node ${NODE_ID}"
 
-if g layout show 2>/dev/null | grep -q "NO ROLE ASSIGNED"; then
+# The layout version is the authoritative signal, and 0 means no layout has ever
+# been applied. Do not grep for "NO ROLE ASSIGNED": that string is printed by
+# `garage status`, not by `garage layout show`, so grepping the latter for it
+# always reports success and every subsequent PUT then fails with a quorum error
+# that says nothing about layouts.
+LAYOUT_VERSION="$(g layout show 2>/dev/null | sed -n 's/^Current cluster layout version: *//p' | tr -d '\r')"
+LAYOUT_VERSION="${LAYOUT_VERSION:-0}"
+
+if [ "$LAYOUT_VERSION" = "0" ]; then
     echo "==> assigning layout"
-    g layout assign -z dc1 -c 1G "$NODE_ID"
-    # apply needs the version it is moving to, which is current + 1.
+    g layout assign -z dc1 -c 20G "$NODE_ID"
+    # apply moves to the next version, which is current + 1.
     g layout apply --version 1
 else
-    echo "==> layout already assigned"
+    echo "==> layout already applied (version ${LAYOUT_VERSION})"
 fi
 
 if ! g bucket info "$BUCKET" >/dev/null 2>&1; then
