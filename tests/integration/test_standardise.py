@@ -442,3 +442,61 @@ def test_the_object_exists_where_the_catalog_says(
     """Invariant 3 from the other side: no row points at bytes that are absent."""
     result = _run(engine, settings, s3, tmp_path, names)
     assert objects.exists(s3, settings.storage.bucket, result.object_key)
+
+
+class TestACanonicalSource:
+    """A source that already publishes in the canonical vocabulary.
+
+    Every ingest so far has gone through a crosswalk, so the pass-through branch
+    of the namespace guard had never run. A source needing no conversion is the
+    ordinary case for anything already keyed on ISO3, and it must not
+    accidentally require a crosswalk to say so.
+    """
+
+    @pytest.fixture
+    def native(self, engine, settings, s3, tmp_path, names):
+        with std.open_run(engine, "ingest_release", "fixture", {}) as current:
+            catalog.ensure_namespace(current, settings.canonical_namespace)
+        ingest.register_source(
+            engine,
+            settings,
+            name=names["source"],
+            native_namespace=settings.canonical_namespace,
+            granularity="annual",
+        )
+        panel_file = tmp_path / "panel.csv"
+        panel_file.write_text(PANEL.replace("Ada", f"Ada{names['tag']}"))
+        ingest.add_release(
+            engine,
+            settings,
+            path=panel_file,
+            source_name=names["source"],
+            released_at=date(2025, 3, 12),
+            s3=s3,
+        )
+        return names
+
+    def test_it_standardises_without_a_crosswalk(
+        self, engine, settings, s3, tmp_path, native
+    ):
+        result = _run(engine, settings, s3, tmp_path, native, crosswalk=None)
+        # Every entity is canonical by definition, including the one the
+        # crosswalk fixture would have left unmapped.
+        assert result.rows_written == EXPECTED_MAPPED + EXPECTED_UNMAPPED
+        assert result.unmapped_entities == 0
+
+    def test_no_unmapped_sibling_is_created(self, engine, settings, s3, tmp_path, native):
+        """There is nothing for it to hold, and an empty group is a lie."""
+        _run(engine, settings, s3, tmp_path, native, crosswalk=None)
+        with engine.connect() as connection:
+            sibling = connection.execute(
+                sa.select(feature_group.c.id).where(
+                    feature_group.c.name == f"{native['group']}__unmapped"
+                )
+            ).scalar_one_or_none()
+        assert sibling is None
+
+    def test_a_crosswalk_here_is_refused(self, engine, settings, s3, tmp_path, native):
+        """It would have nothing to convert, so naming one is a mistake."""
+        with pytest.raises(StandardiseError, match="nothing to convert"):
+            _run(engine, settings, s3, tmp_path, native)

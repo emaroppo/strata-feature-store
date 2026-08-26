@@ -406,3 +406,19 @@ class TestRefusals:
             )
         with pytest.raises(ComposeError, match="never finished"):
             _resolve(engine, settings, _spec(revised))
+
+
+def test_read_writes_parquet_to_a_path(engine, settings, s3, revised, tmp_path):
+    """`read --out` had never been executed; it is one call and no test."""
+    spec = _spec(revised)
+    frozen = compose.freeze(engine, settings, spec, s3=s3)
+    relation, _ = compose.read(engine, settings, spec.name, frozen.version_num)
+
+    out = tmp_path / "panel.parquet"
+    relation.to_parquet(str(out))
+    assert out.exists()
+
+    from feature_store.store import duck
+
+    rows = duck.connect().execute(f"SELECT count(*) FROM read_parquet('{out}')").fetchone()[0]
+    assert rows == 3, "one row per spine timestamp"
