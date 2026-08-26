@@ -13,6 +13,10 @@ set -euo pipefail
 
 COMPOSE="${COMPOSE:-docker compose}"
 BUCKET="${BUCKET:-feature-store}"
+# The test suite creates and deletes objects freely and leaves debris behind.
+# Sharing a bucket with real data means `verify --orphans` can never say
+# anything useful, because every run buries the real answer under test rubble.
+TEST_BUCKET="${TEST_BUCKET:-feature-store-test}"
 KEY_NAME="${KEY_NAME:-feature-store-dev}"
 
 g() { $COMPOSE exec -T storage /garage "$@"; }
@@ -46,16 +50,20 @@ else
     echo "==> layout already applied (version ${LAYOUT_VERSION})"
 fi
 
-if ! g bucket info "$BUCKET" >/dev/null 2>&1; then
-    echo "==> creating bucket ${BUCKET}"
-    g bucket create "$BUCKET"
-fi
+for bucket in "$BUCKET" "$TEST_BUCKET"; do
+    if ! g bucket info "$bucket" >/dev/null 2>&1; then
+        echo "==> creating bucket ${bucket}"
+        g bucket create "$bucket"
+    fi
+done
 
 if ! g key info "$KEY_NAME" >/dev/null 2>&1; then
     echo "==> creating key ${KEY_NAME}"
     g key create "$KEY_NAME" >/dev/null
 fi
-g bucket allow --read --write --owner "$BUCKET" --key "$KEY_NAME" >/dev/null
+for bucket in "$BUCKET" "$TEST_BUCKET"; do
+    g bucket allow --read --write --owner "$bucket" --key "$KEY_NAME" >/dev/null
+done
 
 echo
 echo "==> credentials — export these, or put them in .env"

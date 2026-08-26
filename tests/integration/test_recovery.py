@@ -101,8 +101,39 @@ class TestVerify:
         found = verify.verify(engine, settings, deep=True, s3=s3)
         assert any(a_release.object_key in item for item in found.wrong_digest)
 
-    def test_registry_drift_is_reported(self, engine, settings, s3):
-        """The feature registry is a cache of what the files hold, and caches lie."""
+    def test_a_fact_the_registry_does_not_know_is_drift(self, engine, settings, s3):
+        """The direction that matters: data the vocabulary has lost track of.
+
+        Nothing can discover the feature, and a spec naming it is refused even
+        though the facts are sitting there.
+        """
+        from feature_store.store.tables import feature as feature_table
+        from feature_store.store.tables import feature_group
+
+        name = panel.build_store(engine, settings, s3, _facts("orphaned_feature"))
+        with engine.begin() as connection:
+            group_id = connection.execute(
+                sa.select(feature_group.c.id).where(feature_group.c.name == name)
+            ).scalar_one()
+            connection.execute(
+                sa.delete(feature_table).where(
+                    feature_table.c.feature_group_id == group_id,
+                    feature_table.c.name == "orphaned_feature",
+                )
+            )
+        found = verify.verify(engine, settings, deep=True, s3=s3)
+        assert any("orphaned_feature" in item for item in found.registry_drift)
+        assert not found.ok
+
+    def test_a_registry_row_without_facts_is_not_drift(self, engine, settings, s3):
+        """The ordinary state of a feature nobody has published yet.
+
+        Standardise registers a column from the source's schema whether or not
+        this release carried values for it, so a wide panel's unmapped sibling
+        is almost entirely rows like this. Reporting them would flag correct
+        behaviour as a fault, on a scale that buries the real findings — which
+        is exactly what it did the first time verify ran against the real store.
+        """
         from feature_store.store.tables import feature as feature_table
         from feature_store.store.tables import feature_group
 
@@ -114,7 +145,7 @@ class TestVerify:
             connection.execute(
                 sa.insert(feature_table).values(
                     feature_group_id=group_id,
-                    name="never_written",
+                    name="not_yet_published",
                     dtype="num",
                     created_by_run_id=connection.execute(
                         sa.select(sa.func.max(run_table.c.id))
@@ -122,7 +153,7 @@ class TestVerify:
                 )
             )
         found = verify.verify(engine, settings, deep=True, s3=s3)
-        assert any("never_written" in item for item in found.registry_drift)
+        assert not any("not_yet_published" in item for item in found.registry_drift)
 
     def test_scoping_to_one_run_checks_only_its_outputs(self, engine, settings, s3, a_release):
         whole = verify.verify(engine, settings, s3=s3)

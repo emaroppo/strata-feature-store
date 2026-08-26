@@ -120,7 +120,11 @@ def storage_settings():
 
     made = StorageSettings(
         endpoint_url=os.environ.get("FEATURE_STORE_TEST_S3_ENDPOINT", "http://localhost:3900"),
-        bucket=os.environ.get("FEATURE_STORE_TEST_BUCKET", "feature-store"),
+        # A bucket of the suite's own. These tests create and delete objects
+        # and leave debris; pointing them at the bucket holding real sources
+        # would make `verify --orphans` permanently useless, quite apart from
+        # the risk of a test key colliding with a real one.
+        bucket=os.environ.get("FEATURE_STORE_TEST_BUCKET", "feature-store-test"),
         region="garage",
         addressing_style="path",
     )

@@ -9,13 +9,13 @@ years of debris.
 Three checks, in increasing cost:
 
 **shallow**  every catalog row's object is present, and the right size.
-**deep**     every object's bytes hash to what the row claims, and the feature
-             registry matches the feature names actually in the parquet.
+**deep**     every object's bytes hash to what the row claims, and every feature
+             name in the parquet has a row in the registry.
 **orphans**  every object under the store's prefixes is pointed at by a row.
 
-The registry check is worth the trouble because ``feature`` is a cache of what
-the files contain, and caches lie. It is written from what a run believed it
-emitted, which is not the same thing as what landed.
+The registry check runs one way only. A registry row without facts is the
+ordinary state of a feature nobody has published yet; a fact whose name has no
+row is a vocabulary that has lost track of its own data.
 """
 
 from __future__ import annotations
@@ -146,12 +146,19 @@ def verify(
 
 
 def _registry_drift(engine: sa.Engine, settings: Settings, *, run_id: int | None) -> list[str]:
-    """Feature names the registry claims, against the ones the parquet holds.
+    """Feature names the parquet holds that the registry does not know about.
 
-    The registry is written from what a standardise run believed it emitted. A
-    column that was excluded, renamed, or produced no non-null values at all
-    leaves a row describing a feature that is not there — and a spec selecting
-    it validates against the registry and then resolves to nothing.
+    Only that direction is drift. The registry is a *vocabulary*: it records
+    that a feature exists, which standardise writes from the source's schema
+    whether or not this release carried any non-null values for it. A feature
+    with a row and no facts is therefore the ordinary state of a
+    not-yet-published indicator, and reporting it would flag correct behaviour
+    as a fault — the unmapped sibling of a wide panel is almost entirely made
+    of them.
+
+    A fact whose name has no row is the real problem: the vocabulary is
+    incomplete, so nothing can discover the feature, and a spec naming it is
+    refused even though the data is there.
     """
     from feature_store.store import catalog
 
@@ -182,8 +189,6 @@ def _registry_drift(engine: sa.Engine, settings: Settings, *, run_id: int | None
                     f"SELECT DISTINCT feature_name FROM read_parquet([{urls}])"
                 ).fetchall()
             }
-            for name in sorted(claimed - present):
-                drift.append(f"{group['name']}: registry claims {name!r}, parquet has none")
             for name in sorted(present - claimed):
                 drift.append(f"{group['name']}: parquet holds {name!r}, registry has no row")
     return drift
