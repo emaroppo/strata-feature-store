@@ -214,6 +214,44 @@ class FeatureNameSpec(Strict):
     allow_unlisted: bool = False
 
 
+class VocabularySpec(Strict):
+    """A companion file describing the features, rather than carrying facts.
+
+    Publishers ship these alongside the data: a row per indicator giving its
+    unit, its definition, how it is aggregated, where it came from. That is
+    exactly what ``feature.unit``, ``feature.description`` and ``feature.meta``
+    are for, and without it a store holding thousands of indicators knows every
+    one of their names and nothing about any of them.
+
+    Pinned to a release digest for the same reason a crosswalk version is: the
+    file is reissued, definitions get revised, and a description resolved afresh
+    on every run would silently change what an old ingest claimed a number
+    meant.
+
+    It describes; it never decides what is ingested. A feature present in the
+    data and absent here still gets a registry row, because the data is the
+    authority on what exists and this is the authority on what it means.
+    """
+
+    #: Which release describes the features. A digest, or an unambiguous prefix.
+    release: str
+    #: The column holding the feature name, matched against the vocabulary.
+    key: str
+    description: str | None = None
+    unit: str | None = None
+    #: Columns carried into `feature.meta` verbatim, under their own names.
+    meta: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _describes_something(self):
+        if not (self.description or self.unit or self.meta):
+            raise ValueError(
+                "a vocabulary that names no description, unit or meta columns describes "
+                "nothing; omit it rather than reading a file to no effect"
+            )
+        return self
+
+
 class FeatureSelection(Strict):
     #: Wide layout: columns that are identifiers rather than features.
     exclude: list[str] = Field(default_factory=list)
@@ -225,6 +263,8 @@ class FeatureSelection(Strict):
     value_column: str | None = None
     units: dict[str, str] = Field(default_factory=dict)
     meta: FeatureMetaSpec | None = None
+    #: A companion release describing what the features mean.
+    vocabulary: VocabularySpec | None = None
 
 
 class StandardiseSpec(Strict):

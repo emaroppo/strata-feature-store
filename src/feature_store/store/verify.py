@@ -30,7 +30,13 @@ import sqlalchemy as sa
 from feature_store.spec.canonical import hash_file
 from feature_store.store import duck, objects
 from feature_store.store.config import Settings
-from feature_store.store.tables import feature, feature_group, feature_partition, release
+from feature_store.store.tables import (
+    dataset_version,
+    feature,
+    feature_group,
+    feature_partition,
+    release,
+)
 from feature_store.store.tables import run as run_table
 
 
@@ -67,7 +73,23 @@ class Findings:
 
 
 def _catalogued(connection: sa.Connection, run_id: int | None) -> list[dict[str, Any]]:
-    """Every (key, size, digest, status) the catalog claims exists."""
+    """Every object the catalog claims exists.
+
+    **Every table that names an object key has to appear here**, and the reason
+    is not tidiness. Anything absent from this list is invisible to the
+    consistency checks *and* is reported as an orphan by ``--orphans``, because
+    an orphan is defined as a key nothing in this list points at. So a missing
+    table does not merely go unchecked: it gets deleted by ``--prune-orphans``.
+
+    That is not hypothetical. ``dataset_version.object_prefix`` was missing from
+    the first version of this function, which meant every crosswalk parquet and
+    every materialised composition was classified as debris. Pruning removed
+    three of them, and the store then failed to resolve a crosswalk it still had
+    a catalogued, pinned, immutable version row for.
+
+    Adding a table that stores objects and forgetting this function is
+    therefore a way to lose data, not a way to lose coverage.
+    """
     partitions = sa.select(
         feature_partition.c.object_key.label("key"),
         feature_partition.c.size_bytes.label("size"),
@@ -84,11 +106,28 @@ def _catalogued(connection: sa.Connection, run_id: int | None) -> list[dict[str,
     ).join(run_table, run_table.c.id == release.c.created_by_run_id).where(
         release.c.pruned_at.is_(None)
     )
+    # Crosswalk and composed parquet, addressed by dataset_version rather than
+    # by a partition or a release.
+    versions = (
+        sa.select(
+            dataset_version.c.object_prefix.label("key"),
+            sa.literal(None).label("size"),
+            dataset_version.c.content_hash.label("digest"),
+            run_table.c.status.label("status"),
+            sa.literal("dataset_version").label("kind"),
+        )
+        .join(run_table, run_table.c.id == dataset_version.c.created_by_run_id)
+        .where(dataset_version.c.object_prefix.isnot(None))
+    )
     if run_id is not None:
         partitions = partitions.where(feature_partition.c.created_by_run_id == run_id)
         releases = releases.where(release.c.created_by_run_id == run_id)
+        versions = versions.where(dataset_version.c.created_by_run_id == run_id)
     return [
-        dict(r) for r in connection.execute(partitions.union_all(releases)).mappings().all()
+        dict(r)
+        for r in connection.execute(
+            sa.union_all(partitions, releases, versions)
+        ).mappings().all()
     ]
 
 
@@ -120,11 +159,13 @@ def verify(
         except Exception:
             found.missing.append(row["key"])
             continue
-        if head["ContentLength"] != row["size"]:
+        if row["size"] is not None and head["ContentLength"] != row["size"]:
             found.wrong_size.append(
                 f"{row['key']} ({head['ContentLength']} bytes, catalog says {row['size']})"
             )
-        if deep:
+        if deep and row["kind"] != "dataset_version":
+            # A dataset_version's content_hash identifies the *spec*, not the
+            # bytes, so re-hashing the file would compare two different things.
             with tempfile.TemporaryDirectory() as work:
                 local = Path(work) / "object"
                 s3.download_file(Bucket=bucket, Key=row["key"], Filename=str(local))

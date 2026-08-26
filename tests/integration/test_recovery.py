@@ -459,3 +459,88 @@ class TestPruneOrphans:
     def test_nothing_to_do_is_not_an_error(self, engine, settings, s3, a_release):
         verify.prune_orphans(engine, settings, s3=s3)
         assert verify.prune_orphans(engine, settings, s3=s3)["removed"] == []
+
+
+class TestEveryCatalogueTableIsCovered:
+    """A table that stores objects and is missing from `_catalogued` loses data.
+
+    Anything absent from that list is invisible to the consistency checks *and*
+    is classified as an orphan, because an orphan is defined as a key nothing in
+    the list points at. So the consequence of forgetting a table is not reduced
+    coverage — it is `--prune-orphans` deleting live data.
+
+    `dataset_version.object_prefix` was missing from the first version, which
+    made every crosswalk parquet and every materialised composition look like
+    debris. Three were deleted before anything noticed, and the store then
+    failed to resolve a crosswalk it still held a pinned, immutable version row
+    for.
+    """
+
+    def test_a_crosswalk_parquet_is_not_an_orphan(self, engine, settings, s3, tmp_path):
+        from feature_store.store import crosswalk
+
+        tag = uuid.uuid4().hex[:8]
+        with open_run(engine, "ingest_release", "fixture", {}) as run:
+            catalog.ensure_namespace(run, panel.NAMESPACE)
+        ingest.register_source(
+            engine,
+            settings,
+            name=f"cw_src_{tag}",
+            native_namespace=panel.NAMESPACE,
+            granularity="irregular",
+            kind="crosswalk",
+        )
+        path = tmp_path / "cw.csv"
+        path.write_text(
+            "source_id,target_id,valid_from,valid_to,confidence\n"
+            f"AAA,AAA,1900-01-01,9999-12-31,1.0\n# {tag}\n"
+        )
+        release = ingest.add_release(
+            engine, settings, path=path, source_name=f"cw_src_{tag}", s3=s3
+        )
+        version = crosswalk.register(
+            engine, settings, name=f"cw_{tag}", digest_prefix=release.sha256[:12], s3=s3
+        )
+
+        found = verify.verify(engine, settings, orphans=True, s3=s3)
+        assert version.object_key not in found.orphans, (
+            "a catalogued crosswalk classified as debris would be deleted by --prune-orphans"
+        )
+        assert version.object_key not in found.missing
+
+    def test_a_materialised_composition_is_not_an_orphan(self, engine, settings, s3):
+        from feature_store.spec.compose import ComposeSpec
+
+        name = panel.build_store(engine, settings, s3, _facts())
+        spec = ComposeSpec.model_validate(
+            {
+                "name": f"mat_{uuid.uuid4().hex[:8]}",
+                "spine": {
+                    "entities": {"ids": ["AAA"]},
+                    "times": {"dates": ["2022-06-01"]},
+                },
+                "features": [{"group": name, "name": "gdp"}],
+                "as_of": {"policy": "spine_time"},
+                "freeze": {"mode": "materialized"},
+            }
+        )
+        frozen = compose.freeze(engine, settings, spec, s3=s3)
+        found = verify.verify(engine, settings, orphans=True, s3=s3)
+        assert frozen.object_prefix not in found.orphans
+        assert frozen.object_prefix not in found.missing
+
+    def test_prune_would_not_remove_them(self, engine, settings, s3, a_release):
+        """The consequence, stated directly rather than inferred."""
+        from feature_store.store.tables import dataset_version
+
+        with engine.connect() as connection:
+            catalogued = set(
+                connection.execute(
+                    sa.select(dataset_version.c.object_prefix).where(
+                        dataset_version.c.object_prefix.isnot(None)
+                    )
+                ).scalars().all()
+            )
+        assert catalogued, "nothing to check; the fixture should have frozen something"
+        preview = verify.prune_orphans(engine, settings, s3=s3, dry_run=True)
+        assert not (catalogued & set(preview["would_remove"]))

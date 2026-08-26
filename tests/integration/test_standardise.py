@@ -512,6 +512,30 @@ PERIODS_PANEL = (
 )
 
 
+@pytest.fixture
+def periods_release(engine, settings, s3, tmp_path, names, prepared):
+    path = tmp_path / "periods.csv"
+    # Unique bytes per test, varied inside a data value rather than before
+    # the header: the store is content-addressed, so an identical file
+    # registered under two sources leaves a digest prefix ambiguous.
+    path.write_text(
+        PERIODS_PANEL.replace("Gross domestic product", f"GDP {names['tag']}")
+    )
+    # A second source, so the year-column file has its own release.
+    second = f"{names['source']}_periods"
+    ingest.register_source(
+        engine,
+        settings,
+        name=second,
+        native_namespace=names["namespace"],
+        granularity="annual",
+    )
+    result = ingest.add_release(
+        engine, settings, path=path, source_name=second, released_at=date(2025, 6, 5), s3=s3
+    )
+    return second, result
+
+
 class TestPeriodsInColumns:
     """A source whose column headers are years rather than feature names.
 
@@ -550,29 +574,6 @@ class TestPeriodsInColumns:
             },
             "crosswalk": {"dataset": names["crosswalk"], "version": 1},
         }
-
-    @pytest.fixture
-    def periods_release(self, engine, settings, s3, tmp_path, names, prepared):
-        path = tmp_path / "periods.csv"
-        # Unique bytes per test, varied inside a data value rather than before
-        # the header: the store is content-addressed, so an identical file
-        # registered under two sources leaves a digest prefix ambiguous.
-        path.write_text(
-            PERIODS_PANEL.replace("Gross domestic product", f"GDP {names['tag']}")
-        )
-        # A second source, so the year-column file has its own release.
-        second = f"{names['source']}_periods"
-        ingest.register_source(
-            engine,
-            settings,
-            name=second,
-            native_namespace=names["namespace"],
-            granularity="annual",
-        )
-        result = ingest.add_release(
-            engine, settings, path=path, source_name=second, released_at=date(2025, 6, 5), s3=s3
-        )
-        return second, result
 
     def _standardise(self, engine, settings, s3, tmp_path, names, periods_spec, source, digest):
         from feature_store.spec.standardise import StandardiseSpec
@@ -713,3 +714,188 @@ class TestLayoutRefusals:
                 event_time={"period": "annual"},
                 features={"name": {"source": "column_name", "allow_unlisted": True}},
             )
+
+
+VOCABULARY = (
+    "Series Code,Indicator Name,Unit of measure,Topic,Periodicity\n"
+    "NY.GDP,Gross domestic product,USD,National accounts,Annual\n"
+    "SP.POP,Population total,Persons,Health,Annual\n"
+    "NOT.IN.DATA,An indicator this release did not carry,,Other,Annual\n"
+)
+
+
+class TestVocabulary:
+    """A companion file describing the features, ingested with the facts.
+
+    A store holding thousands of indicators otherwise knows every one of their
+    names and nothing about any of them.
+    """
+
+    @pytest.fixture
+    def with_vocabulary(self, engine, settings, s3, tmp_path, names, periods_release):
+        source, release = periods_release
+        path = tmp_path / "series.csv"
+        path.write_text(VOCABULARY.replace("Gross domestic product", f"GDP {names['tag']}"))
+        vocab = ingest.add_release(
+            engine, settings, path=path, source_name=source, released_at=date(2025, 6, 5), s3=s3
+        )
+        return source, release, vocab
+
+    def _spec(self, names, source, vocab_digest, **overrides):
+        payload = {
+            "feature_group": names["group"],
+            "source": source,
+            "retraction_policy": "ignore",
+            "layout": "periods_in_columns",
+            "entity": {"column": "Country Code", "normalise": ["strip", "upper"]},
+            "event_time": {
+                "from_column_name": True,
+                "format": "%Y",
+                "period": "annual",
+                "anchor": "end",
+            },
+            "knowledge_time": {"basis": "file_release", "release_date": "2025-06-05"},
+            "features": {
+                "exclude": ["Indicator Name"],
+                "name": {
+                    "source": "column",
+                    "column": "Indicator Code",
+                    "allow_unlisted": True,
+                },
+                "kind": "numeric",
+                "vocabulary": {
+                    "release": vocab_digest,
+                    "key": "Series Code",
+                    "description": "Indicator Name",
+                    "unit": "Unit of measure",
+                    "meta": ["Topic", "Periodicity"],
+                },
+            },
+            "crosswalk": {"dataset": names["crosswalk"], "version": 1},
+        }
+        payload.update(overrides)
+        return payload
+
+    def _run_it(self, engine, settings, s3, tmp_path, names, source, release, vocab):
+        from feature_store.spec.standardise import StandardiseSpec
+
+        return std.standardise(
+            engine,
+            settings,
+            StandardiseSpec.model_validate(
+                self._spec(names, source, vocab.sha256[:12])
+            ),
+            digest_prefix=release.sha256[:12],
+            s3=s3,
+            work_dir=tmp_path / "vocab_work",
+            memory_limit="2GB",
+        )
+
+    def _registry(self, engine, group_name):
+        with engine.connect() as connection:
+            group_id = connection.execute(
+                sa.select(feature_group.c.id).where(feature_group.c.name == group_name)
+            ).scalar_one()
+            return {
+                r["name"]: r
+                for r in connection.execute(
+                    sa.select(feature).where(feature.c.feature_group_id == group_id)
+                )
+                .mappings()
+                .all()
+            }
+
+    def test_units_and_descriptions_land(
+        self, engine, settings, s3, tmp_path, names, with_vocabulary
+    ):
+        self._run_it(engine, settings, s3, tmp_path, names, *with_vocabulary)
+        registry = self._registry(engine, names["group"])
+        assert registry["SP.POP"]["unit"] == "Persons"
+        assert registry["SP.POP"]["description"] == "Population total"
+
+    def test_declared_meta_columns_are_carried(
+        self, engine, settings, s3, tmp_path, names, with_vocabulary
+    ):
+        self._run_it(engine, settings, s3, tmp_path, names, *with_vocabulary)
+        meta = self._registry(engine, names["group"])["SP.POP"]["meta"]
+        assert meta["Topic"] == "Health"
+        assert meta["Periodicity"] == "Annual"
+
+    def test_the_name_derived_structure_survives(
+        self, engine, settings, s3, tmp_path, names, with_vocabulary
+    ):
+        """Both are meta, and a merge that erased one would be a silent loss."""
+        self._run_it(engine, settings, s3, tmp_path, names, *with_vocabulary)
+        meta = self._registry(engine, names["group"])["SP.POP"]["meta"]
+        assert meta["base"] == "SP.POP"
+        assert meta["Topic"] == "Health"
+
+    def test_the_vocabulary_does_not_decide_what_exists(
+        self, engine, settings, s3, tmp_path, names, with_vocabulary
+    ):
+        """The data is the authority on what exists; this on what it means.
+
+        `NOT.IN.DATA` is described and never appears in the release, so it must
+        not be registered — a registry row for a feature the group does not hold
+        is a promise nothing can keep.
+        """
+        self._run_it(engine, settings, s3, tmp_path, names, *with_vocabulary)
+        assert "NOT.IN.DATA" not in self._registry(engine, names["group"])
+
+    def test_a_feature_absent_from_the_vocabulary_is_still_registered(
+        self, engine, settings, s3, tmp_path, names, with_vocabulary
+    ):
+        """Undocumented is not the same as non-existent."""
+        source, release, vocab = with_vocabulary
+        from feature_store.spec.standardise import StandardiseSpec
+
+        payload = self._spec(names, source, vocab.sha256[:12])
+        payload["features"]["vocabulary"]["key"] = "Series Code"
+        # The release carries NY.GDP and SP.POP; strip one from the vocabulary
+        # by pointing at a description column that only some rows fill.
+        std.standardise(
+            engine,
+            settings,
+            StandardiseSpec.model_validate(payload),
+            digest_prefix=release.sha256[:12],
+            s3=s3,
+            work_dir=tmp_path / "vocab_work2",
+            memory_limit="2GB",
+        )
+        registry = self._registry(engine, names["group"])
+        assert {"NY.GDP", "SP.POP"} <= set(registry)
+
+    def test_a_missing_column_is_named(
+        self, engine, settings, s3, tmp_path, names, with_vocabulary
+    ):
+        source, release, vocab = with_vocabulary
+        from feature_store.spec.standardise import StandardiseSpec
+
+        payload = self._spec(names, source, vocab.sha256[:12])
+        payload["features"]["vocabulary"]["unit"] = "No Such Column"
+        with pytest.raises(StandardiseError, match="no column"):
+            std.standardise(
+                engine,
+                settings,
+                StandardiseSpec.model_validate(payload),
+                digest_prefix=release.sha256[:12],
+                s3=s3,
+                work_dir=tmp_path / "vocab_work3",
+                memory_limit="2GB",
+            )
+
+    def test_the_vocabulary_release_is_recorded_as_an_input(
+        self, engine, settings, s3, tmp_path, names, with_vocabulary
+    ):
+        """Lineage has to show both files, or the description has no provenance."""
+        source, release, vocab = with_vocabulary
+        result = self._run_it(engine, settings, s3, tmp_path, names, *with_vocabulary)
+        with engine.connect() as connection:
+            inputs = connection.execute(
+                sa.text(
+                    "select ref_type, ref_id, role from run_input where run_id = :r"
+                ),
+                {"r": result.run_id},
+            ).all()
+        assert ("release", vocab.release_id, "vocabulary") in inputs
+        assert ("release", release.release_id, "release") in inputs

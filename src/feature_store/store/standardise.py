@@ -298,30 +298,115 @@ def _feature_vocabulary(con, relation: str, spec: StandardiseSpec, melted: list[
     return [spec.features.name.rename.get(n, n) for n in names]
 
 
-def _register_features(run: Run, group_id: int, names: list[str], spec: StandardiseSpec) -> int:
+def read_vocabulary(con, local_path: str, spec: StandardiseSpec) -> dict[str, dict[str, Any]]:
+    """Load the companion file describing the features.
+
+    Returns a mapping from feature name to whatever the file says about it.
+    Nothing here decides which features exist — the data does that — so a name
+    missing from this mapping simply gets a registry row with nothing attached.
+    """
+    vocabulary = spec.features.vocabulary
+    reader = f"read_csv('{local_path}', header=true, all_varchar=true, sample_size=-1)"
+    wanted = [vocabulary.key]
+    for column in (vocabulary.description, vocabulary.unit):
+        if column:
+            wanted.append(column)
+    wanted.extend(vocabulary.meta)
+
+    selected = ", ".join(_quote(c) for c in dict.fromkeys(wanted))
+    header = [row[0] for row in con.execute(f"SELECT * FROM {reader} LIMIT 0").description]
+    missing = [c for c in dict.fromkeys(wanted) if c not in header]
+    if missing:
+        raise StandardiseError(
+            f"the vocabulary file has no column(s) {missing}. It has {len(header)} columns, "
+            f"starting {header[:5]}."
+        )
+
+    described: dict[str, dict[str, Any]] = {}
+    for row in con.execute(f"SELECT {selected} FROM {reader}").fetchall():
+        entry = dict(zip(dict.fromkeys(wanted), row))
+        key = entry.pop(vocabulary.key, None)
+        if not key:
+            continue
+        described[key] = {k: v for k, v in entry.items() if v not in (None, "")}
+    return described
+
+
+def _register_features(
+    run: Run,
+    group_id: int,
+    names: list[str],
+    spec: StandardiseSpec,
+    described: dict[str, dict[str, Any]] | None = None,
+) -> int:
     """Write the vocabulary registry for what this group actually contains."""
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+    described = described or {}
+    vocabulary = spec.features.vocabulary
     dtype = "num" if spec.features.kind == "numeric" else "str"
     rows = []
     for name in dict.fromkeys(names):
+        entry = described.get(name, {})
+        # Structure read out of the name, plus whatever the publisher's own
+        # vocabulary file says. Kept in one blob rather than spread across
+        # columns because what a publisher documents differs by publisher, and
+        # a column per field would be a schema change for every new source.
+        meta = to_jsonable(decompose(name, spec.features.meta))
+        if vocabulary:
+            meta.update(
+                {k: v for k, v in entry.items() if k in vocabulary.meta}
+            )
         rows.append(
             {
                 "feature_group_id": group_id,
                 "name": name,
                 "dtype": dtype,
-                "unit": spec.features.units.get(name),
+                # A units map in the config wins over the file: it is the more
+                # specific statement, written for this group by whoever knew
+                # the file was wrong.
+                "unit": spec.features.units.get(name)
+                or (entry.get(vocabulary.unit) if vocabulary and vocabulary.unit else None),
+                "description": (
+                    entry.get(vocabulary.description)
+                    if vocabulary and vocabulary.description
+                    else None
+                ),
                 "created_by_run_id": run.id,
-                "meta": to_jsonable(decompose(name, spec.features.meta)),
+                "meta": meta,
             }
         )
     if not rows:
         return 0
     with run.transaction() as connection:
+        statement = pg_insert(feature).values(rows)
+        # A feature already registered keeps its identity and takes the better
+        # description. Doing nothing on conflict, which is what this did first,
+        # meant a vocabulary file added after the initial ingest never landed:
+        # the rows existed, so every one of them was skipped.
+        #
+        # `dtype` is deliberately not updated. One feature name is one dtype
+        # forever, and a re-registration that changed it would silently break
+        # every consumer that had already branched on it.
         connection.execute(
-            pg_insert(feature)
-            .values(rows)
-            .on_conflict_do_nothing(index_elements=["feature_group_id", "name"])
+            statement.on_conflict_do_update(
+                index_elements=["feature_group_id", "name"],
+                set_={
+                    "unit": sa.func.coalesce(
+                        statement.excluded.unit, feature.c.unit
+                    ),
+                    "description": sa.func.coalesce(
+                        statement.excluded.description, feature.c.description
+                    ),
+                    # Merged rather than replaced: the name-derived structure
+                    # and the publisher's own fields are both meta, and a
+                    # standardise that knows only one of them must not erase
+                    # the other.
+                    "meta": sa.func.coalesce(feature.c.meta, sa.text("'{}'::jsonb")).op("||")(
+                        sa.func.coalesce(statement.excluded.meta, sa.text("'{}'::jsonb"))
+                    ),
+                },
+            )
         )
     return len(rows)
 
@@ -434,6 +519,7 @@ def _write_part(
     bucket: str,
     role: str,
     input_hash: str,
+    release_sha256: str,
 ) -> WrittenPart | None:
     """Sort one view into parquet, put it in the bucket, then record it.
 
@@ -494,6 +580,9 @@ def _write_part(
             partition_values={
                 "entity_namespace": namespace,
                 "input_hash": input_hash,
+                # Which release these facts came from, so a re-standardise can
+                # find the parts it replaces.
+                "release_sha256": release_sha256,
                 "feature_min": bounds[4],
                 "feature_max": bounds[5],
             },
@@ -509,6 +598,58 @@ def _write_part(
     current.observed_knowledge_time(bounds[2])
     parquet_path.unlink(missing_ok=True)
     return WrittenPart(partition_id, key, rows)
+
+
+def _supersede_previous(run: Run, group_ids: list[int], release_id: int) -> int:
+    """Retire parts this run replaced.
+
+    A partition is replaced when it sits in one of these groups, was written by
+    an earlier run that read the *same release*, and **this run has not claimed
+    it**. That last condition is not a detail: an unchanged batch is reused
+    rather than rewritten, and the reusing run records it as its own output.
+    Without the exclusion a re-standardise supersedes the very parts it just
+    decided were still good, and the group ends up with nothing live at all.
+
+    Matched through lineage rather than through anything stored on the partition
+    itself: ``run_input`` already records which release a run read, it is the
+    same fact, and it works for partitions written before this function existed.
+    A key added to ``partition_values`` would only match rows written after it
+    was introduced, which is precisely when a supersede rule is least useful.
+
+    Marked rather than deleted, so a frozen version pinned before the correction
+    keeps resolving to what it resolved to then — the whole point of pinning —
+    and ``verify`` can still account for the bytes.
+    """
+    from feature_store.store.tables import run_input, run_output
+
+    if not group_ids:
+        return 0
+
+    # Everything this run produced or reused. A reused part is as current as a
+    # freshly written one; the run simply found the work already done.
+    kept = (
+        sa.select(run_output.c.ref_id)
+        .where(run_output.c.run_id == run.id, run_output.c.ref_type == "feature_partition")
+        .scalar_subquery()
+    )
+    earlier_runs = (
+        sa.select(run_input.c.run_id)
+        .where(run_input.c.ref_type == "release", run_input.c.ref_id == release_id)
+        .scalar_subquery()
+    )
+    with run.transaction() as connection:
+        result = connection.execute(
+            sa.update(feature_partition)
+            .where(
+                feature_partition.c.feature_group_id.in_(group_ids),
+                feature_partition.c.created_by_run_id != run.id,
+                feature_partition.c.created_by_run_id.in_(earlier_runs),
+                feature_partition.c.id.notin_(kept),
+                feature_partition.c.superseded_by_run_id.is_(None),
+            )
+            .values(superseded_by_run_id=run.id)
+        )
+    return result.rowcount or 0
 
 
 def standardise(
@@ -574,6 +715,21 @@ def standardise(
         names = _feature_columns(con, str(local_source), spec)
         relation = _source_relation(str(local_source))
         vocabulary = _feature_vocabulary(con, relation, spec, names)
+
+        described: dict[str, dict[str, Any]] = {}
+        if spec.features.vocabulary:
+            with engine.connect() as connection:
+                companion = catalog.find_release(connection, spec.features.vocabulary.release)
+            if companion is None:
+                raise StandardiseError(
+                    f"no release whose digest starts with "
+                    f"{spec.features.vocabulary.release!r} to read the vocabulary from"
+                )
+            current.read("release", companion["id"], role="vocabulary")
+            local_vocabulary = work / companion["original_filename"]
+            if not local_vocabulary.exists():
+                objects.get_to_file(s3, bucket, companion["object_key"], local_vocabulary)
+            described = read_vocabulary(con, str(local_vocabulary), spec)
         ingest_time = _naive_utc_now()
 
         canonical = settings.canonical_namespace
@@ -667,6 +823,7 @@ def standardise(
                             "batch": index,
                         }
                     ),
+                    release_sha256=release["sha256"],
                 )
                 if part is None:
                     continue
@@ -698,10 +855,27 @@ def standardise(
         registered = 0
         if not dry_run:
             for group_name, group_id in groups.items():
-                registered += _register_features(current, group_id, vocabulary, spec)
+                registered += _register_features(
+                    current, group_id, vocabulary, spec, described
+                )
                 current.wrote("feature_group", group_id, role="group")
 
+        # A re-standardise of the same release under a changed config describes
+        # the same source data a different way, so the previous parts are
+        # replaced rather than added to. Without this both stay live and every
+        # fact is counted twice.
+        #
+        # Superseded rather than deleted: a frozen version pinned before the
+        # correction keeps resolving to what it resolved to then, which is the
+        # whole point of pinning. Done once at the end rather than per part,
+        # because a run that died halfway would otherwise leave a group half
+        # described by each config, which is worse than either alone.
+        superseded = 0 if dry_run else _supersede_previous(
+            current, list(groups.values()), release["id"]
+        )
+
         current.note(
+            superseded_partitions=superseded,
             rows=written,
             unmapped_rows=unmapped_rows,
             unmapped_entities=len(unmapped_ids),

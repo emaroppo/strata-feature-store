@@ -39,7 +39,20 @@
       "column": "Indicator Code",
       "allow_unlisted": true
     },
-    "kind": "numeric"
+    "kind": "numeric",
+    "vocabulary": {
+      "release": "36c711aded3b",
+      "key": "Series Code",
+      "description": "Indicator Name",
+      "unit": "Unit of measure",
+      "meta": [
+        "Topic",
+        "Periodicity",
+        "Aggregation method",
+        "Source",
+        "License Type"
+      ]
+    }
   },
   "crosswalk": {
     "dataset": "wdi_to_iso3",
