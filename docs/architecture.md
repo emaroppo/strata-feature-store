@@ -527,19 +527,28 @@ Plugin seams are designed at the third implementation, not the first.
 
 ## 15. Decisions worth recording as ADRs
 
-- Long format; wide as derived output only
-- Period labels anchor to the period end (recorded: `docs/adr/0001`)
-- Bitemporal storage, and what `modeled_lag` means
-- Entity ids canonicalised at write, not resolved at read
-- Crosswalks are one-to-one; succession deferred to a knowledge layer
-- Unmapped entities routed to a sibling group, never dropped
-- Revisions carry the release date as knowledge_time
-- Frozen `query` versions pin an ingest watermark, and warn when it withholds
-- Retraction as a per-group policy resolved at read
-- No `StorageBackend` abstraction; the store owns its own bucket
-- `TEXT` + `CHECK` over native Postgres enums
-- Naive UTC everywhere
-- Frozen versions immutable; fidelity upgrades create new versions
+Recorded in `docs/adr/`:
+
+| | |
+|---|---|
+| 0001 | Period labels anchor to the period end |
+| 0002 | Facts are stored long; wide is a presentation |
+| 0003 | Three timestamps, and what a modelled lag means |
+| 0004 | A revision carries the date of the release that changed it |
+| 0005 | Entity ids are canonicalised at write, not resolved at read |
+| 0006 | Crosswalks are one-to-one, and unmapped entities are routed |
+| 0007 | A frozen version pins the ingest watermark too |
+| 0008 | Frozen versions are immutable, enforced by the database |
+| 0009 | Whether a null withdraws a value is declared per group |
+| 0010 | One storage code path, and a bucket of its own |
+| 0011 | Enum-like columns are TEXT with a CHECK |
+| 0012 | Every timestamp is naive UTC |
+
+Two decisions from earlier drafts are deliberately *not* recorded, because they
+turned out to restate an implementation rather than choose between defensible
+alternatives: melting batched by column (a memory limit, not a design), and the
+wide pivot being written out rather than generated (one behaviour of `PIVOT`,
+documented where it is used).
 
 Dormancy of several months is the normal case for a background project. Re-deriving these
 from scratch is what turns a pause into an abandonment.

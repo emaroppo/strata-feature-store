@@ -9,4 +9,8 @@ alternative is defensible, or when the reasoning is not visible from the code.
 Not every choice needs one; a record that merely restates an implementation is
 noise.
 
-`docs/architecture.md` §15 lists the decisions still owed a record.
+Two decisions from earlier drafts were deliberately left out, because they
+restate an implementation rather than choose between defensible alternatives:
+melting batched by column (a memory limit, not a design) and writing the wide
+pivot out rather than generating it (one behaviour of `PIVOT`, documented where
+it is used).
