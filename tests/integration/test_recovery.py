@@ -234,7 +234,7 @@ class TestUndo:
     def test_the_run_row_survives(self, engine, settings, s3):
         """That it happened is a fact. A catalog that erases its own history is
         exactly the fiction lineage exists to prevent."""
-        name = panel.build_store(engine, settings, s3, _facts())
+        panel.build_store(engine, settings, s3, _facts())
         with engine.connect() as connection:
             run_id = connection.execute(
                 sa.select(sa.func.max(run_table.c.id))
@@ -296,7 +296,7 @@ class TestUndo:
             verify.undo(engine, settings, run_id, s3=s3)
 
     def test_undoing_twice_is_refused(self, engine, settings, s3):
-        name = panel.build_store(engine, settings, s3, _facts())
+        panel.build_store(engine, settings, s3, _facts())
         with engine.connect() as connection:
             run_id = connection.execute(sa.select(sa.func.max(run_table.c.id))).scalar_one()
         verify.undo(engine, settings, run_id, s3=s3)
