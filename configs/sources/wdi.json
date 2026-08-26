@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "feature_group": "wdi",
+  "source": "wdi",
+  "description": "One row per (country, indicator); one column per year. The mirror of the seed panel, which is one row per country-date and one column per indicator.",
+  "retraction_policy": "ignore",
+  "reader": {
+    "format": "csv",
+    "options": {}
+  },
+  "layout": "periods_in_columns",
+  "entity": {
+    "column": "Country Code",
+    "normalise": [
+      "strip",
+      "upper"
+    ],
+    "drop_if_null": true
+  },
+  "event_time": {
+    "from_column_name": true,
+    "format": "%Y",
+    "period": "annual",
+    "anchor": "end"
+  },
+  "knowledge_time": {
+    "basis": "modeled_lag",
+    "declared_lag": "P3M",
+    "lag_anchor_period": "annual",
+    "rationale": "The publisher issues an annual update, typically in the spring, covering through the previous calendar year. A lag measured from the end of the event's year therefore approximates when a figure first became available. It is a counterfactual for older years rather than a record of first publication - fidelity is modeled_lag, and per-release dates would be an upgrade to file_release. Column headers are bare years, so event_time is anchored to the year end; see docs/adr/0001 for why the end rather than the start."
+  },
+  "features": {
+    "exclude": [
+      "Country Name",
+      "Indicator Name"
+    ],
+    "name": {
+      "source": "column",
+      "column": "Indicator Code",
+      "allow_unlisted": true
+    },
+    "kind": "numeric"
+  },
+  "crosswalk": {
+    "dataset": "wdi_to_iso3",
+    "version": 1
+  }
+}

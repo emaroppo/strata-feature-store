@@ -116,7 +116,16 @@ def _melt_query(
     columns: list[str],
     ingest_time: datetime,
 ) -> str:
-    """Reshape a batch of wide columns into the long schema."""
+    """Reshape a batch of melted columns into the long schema.
+
+    Both melted layouts unpivot columns; they differ in what a column *header*
+    means, and therefore in which of the seven fields it becomes.
+
+    ``features_in_columns``  the header is a feature name, and the row carries
+                             the entity and the time
+    ``periods_in_columns``   the header is a period label, and the row carries
+                             the entity and the feature name
+    """
     entity = _quote(spec.entity.column)
     for step in spec.entity.normalise:
         entity = {
@@ -136,21 +145,39 @@ def _melt_query(
             else f"{column}::TIMESTAMP"
         )
 
-    renames = spec.features.name.rename
-    if renames:
-        cases = " ".join(f"WHEN '{name}' THEN '{alias}'" for name, alias in sorted(renames.items()))
-        feature_name = f"CASE raw_name {cases} ELSE raw_name END"
+    if spec.event_time.from_column_name:
+        # The header is a period label, so the anchor decides what date it
+        # becomes -- and that decides what a backtest is allowed to see.
+        # See docs/adr/0001.
+        parsed = (
+            f"strptime(raw_name, '{spec.event_time.format}')::DATE"
+            if spec.event_time.format
+            else "raw_name::DATE"
+        )
+        event_time = _anchor_sql(parsed, spec.event_time.period, spec.event_time.anchor)
+        feature_name = _quote(spec.features.name.column)
+        carried = [spec.entity.column, spec.features.name.column]
     else:
-        feature_name = "raw_name"
+        event_time = _event_time_expression(spec)
+        renames = spec.features.name.rename
+        if renames:
+            cases = " ".join(
+                f"WHEN '{name}' THEN '{alias}'" for name, alias in sorted(renames.items())
+            )
+            feature_name = f"CASE raw_name {cases} ELSE raw_name END"
+        else:
+            feature_name = "raw_name"
+        carried = [spec.entity.column, spec.event_time.column]
+
+    if spec.knowledge_time.column:
+        carried.append(spec.knowledge_time.column)
 
     value_num = (
         "TRY_CAST(raw_value AS DOUBLE)" if spec.features.kind == "numeric" else "NULL::DOUBLE"
     )
     value_str = "NULL::VARCHAR" if spec.features.kind == "numeric" else "raw_value"
 
-    keep = ", ".join(
-        _quote(c) for c in dict.fromkeys([spec.entity.column, spec.event_time.column, *columns])
-    )
+    keep = ", ".join(_quote(c) for c in dict.fromkeys([*carried, *columns]))
     melted_on = ", ".join(_quote(c) for c in columns)
 
     return f"""
@@ -160,17 +187,31 @@ def _melt_query(
         INTO NAME raw_name VALUE raw_value
     )
     SELECT
-        {entity}                       AS {long_schema.ENTITY_ID},
-        {_event_time_expression(spec)} AS {long_schema.EVENT_TIME},
-        {knowledge}                    AS {long_schema.KNOWLEDGE_TIME},
-        TIMESTAMP '{ingest_time}'      AS {long_schema.INGEST_TIME},
-        {feature_name}                 AS {long_schema.FEATURE_NAME},
-        {value_num}                    AS {long_schema.VALUE_NUM},
-        {value_str}                    AS {long_schema.VALUE_STR}
+        {entity}                  AS {long_schema.ENTITY_ID},
+        {event_time}              AS {long_schema.EVENT_TIME},
+        {knowledge}               AS {long_schema.KNOWLEDGE_TIME},
+        TIMESTAMP '{ingest_time}' AS {long_schema.INGEST_TIME},
+        {feature_name}            AS {long_schema.FEATURE_NAME},
+        {value_num}               AS {long_schema.VALUE_NUM},
+        {value_str}               AS {long_schema.VALUE_STR}
     FROM melted
     WHERE raw_value IS NOT NULL
       AND {entity} IS NOT NULL
     """
+
+
+def _anchor_sql(expression: str, period: str, anchor: str) -> str:
+    """Snap a parsed period label to the end (or start) of its period."""
+    from feature_store.spec.timebasis import period_end_sql, period_start_sql
+
+    if period in UNBOUNDED:
+        return expression
+    snapped = (
+        period_start_sql(expression, period)
+        if anchor == "start"
+        else period_end_sql(expression, period)
+    )
+    return f"({snapped})::DATE"
 
 
 def batches(items: list[str], size: int = COLUMN_BATCH) -> list[list[str]]:
@@ -183,7 +224,11 @@ def _feature_columns(connection, source_path: str, spec: StandardiseSpec) -> lis
     header = connection.execute(f"SELECT * FROM {reader} LIMIT 0").description
     names = [row[0] for row in header]
 
-    identifiers = {spec.entity.column, spec.event_time.column, *spec.features.exclude}
+    identifiers = {spec.entity.column, *spec.features.exclude}
+    if spec.event_time.column:
+        identifiers.add(spec.event_time.column)
+    if spec.features.name.column:
+        identifiers.add(spec.features.name.column)
     if spec.knowledge_time.column:
         identifiers.add(spec.knowledge_time.column)
 
@@ -201,7 +246,7 @@ def _feature_columns(connection, source_path: str, spec: StandardiseSpec) -> lis
             raise StandardiseError(f"features.include names unknown columns: {sorted(unknown)}")
         candidates = [n for n in candidates if n in spec.features.include]
 
-    if not spec.features.name.allow_unlisted:
+    if not spec.features.name.allow_unlisted and not spec.event_time.from_column_name:
         unlisted = [n for n in candidates if n not in spec.features.name.rename]
         if unlisted:
             raise StandardiseError(
@@ -213,14 +258,40 @@ def _feature_columns(connection, source_path: str, spec: StandardiseSpec) -> lis
     return candidates
 
 
+def _feature_vocabulary(con, relation: str, spec: StandardiseSpec, melted: list[str]) -> list[str]:
+    """The feature names this group will hold.
+
+    Under ``features_in_columns`` they are the melted column headers, known from
+    the schema alone. Under ``periods_in_columns`` the headers are years and the
+    names live in a column, so the vocabulary has to be read out of the data.
+
+    Either way it is a *vocabulary* rather than a summary of what happened to be
+    non-null, which is what lets a not-yet-published feature resolve to null
+    while a misspelled one is refused.
+    """
+    if not spec.event_time.from_column_name:
+        return [spec.features.name.rename.get(c, c) for c in melted]
+
+    column = _quote(spec.features.name.column)
+    names = [
+        row[0]
+        for row in con.execute(
+            f"SELECT DISTINCT {column} FROM {relation} "
+            f"WHERE {column} IS NOT NULL ORDER BY 1"
+        ).fetchall()
+    ]
+    if spec.features.name.allow is not None:
+        names = [n for n in names if n in spec.features.name.allow]
+    return [spec.features.name.rename.get(n, n) for n in names]
+
+
 def _register_features(run: Run, group_id: int, names: list[str], spec: StandardiseSpec) -> int:
     """Write the vocabulary registry for what this group actually contains."""
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     dtype = "num" if spec.features.kind == "numeric" else "str"
     rows = []
-    for raw in names:
-        name = spec.features.name.rename.get(raw, raw)
+    for name in dict.fromkeys(names):
         rows.append(
             {
                 "feature_group_id": group_id,
@@ -489,6 +560,7 @@ def standardise(
         )
         names = _feature_columns(con, str(local_source), spec)
         relation = _source_relation(str(local_source))
+        vocabulary = _feature_vocabulary(con, relation, spec, names)
         ingest_time = _naive_utc_now()
 
         canonical = settings.canonical_namespace
@@ -613,7 +685,7 @@ def standardise(
         registered = 0
         if not dry_run:
             for group_name, group_id in groups.items():
-                registered += _register_features(current, group_id, names, spec)
+                registered += _register_features(current, group_id, vocabulary, spec)
                 current.wrote("feature_group", group_id, role="group")
 
         current.note(
@@ -634,7 +706,7 @@ def standardise(
             partition_id=primary_partition,
             object_key=primary_key,
             rows_written=written,
-            features_registered=registered if not dry_run else len(names),
+            features_registered=registered if not dry_run else len(vocabulary),
             unmapped_entities=len(unmapped_ids) or unmapped_rows,
             uncastable_values=uncastable,
             reused_existing=False,

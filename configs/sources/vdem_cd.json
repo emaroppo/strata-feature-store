@@ -8,7 +8,7 @@
     "format": "csv",
     "options": {}
   },
-  "layout": "wide",
+  "layout": "features_in_columns",
   "entity": {
     "column": "country_text_id",
     "normalise": [

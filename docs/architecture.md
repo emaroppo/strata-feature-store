@@ -528,6 +528,7 @@ Plugin seams are designed at the third implementation, not the first.
 ## 15. Decisions worth recording as ADRs
 
 - Long format; wide as derived output only
+- Period labels anchor to the period end (recorded: `docs/adr/0001`)
 - Bitemporal storage, and what `modeled_lag` means
 - Entity ids canonicalised at write, not resolved at read
 - Crosswalks are one-to-one; succession deferred to a knowledge layer

@@ -58,14 +58,32 @@ class EntitySpec(Strict):
 
 
 class EventTimeSpec(Strict):
-    column: str
+    #: Which column carries the time. Omitted when the *column names* do, which
+    #: is the `periods_in_columns` layout.
+    column: str | None = None
+    #: Set when each melted column name is a period label rather than a feature.
+    from_column_name: bool = False
     #: strptime format. Omitted means the reader already produced a date.
     format: str | None = None
     period: str = "irregular"
+    #: Which end of the period `event_time` names. Defaults to the end, and the
+    #: reason is not cosmetic: see docs/adr/0001. A period label anchored to its
+    #: start claims a figure was knowable months before it existed.
     anchor: str = "end"
 
     @model_validator(mode="after")
     def _known_period_and_anchor(self):
+        if self.from_column_name and self.column:
+            raise ValueError(
+                "event_time comes from the column names or from a column, not both"
+            )
+        if not self.from_column_name and not self.column:
+            raise ValueError("event_time needs a column, or from_column_name")
+        if self.from_column_name and self.period == "irregular":
+            raise ValueError(
+                "a period label needs a period to anchor within; 'irregular' has no "
+                "boundary to anchor to"
+            )
         if self.period not in PERIODS:
             raise ValueError(f"period must be one of {PERIODS}, not {self.period!r}")
         if self.anchor not in ANCHORS:
@@ -198,7 +216,21 @@ class StandardiseSpec(Strict):
     feature_group: str
     source: str
     reader: ReaderSpec = Field(default_factory=ReaderSpec)
-    layout: Literal["wide", "long"] = "wide"
+    #: What the melted column headers mean, which decides which of the seven
+    #: fields they become.
+    #:
+    #: ``features_in_columns``  each column is a feature; the row carries entity
+    #:                          and time
+    #: ``periods_in_columns``   each column is a period; the row carries entity
+    #:                          and feature name
+    #: ``long``                 nothing to melt; one row is already one fact
+    #:
+    #: Named for what is in the columns rather than for a shape, because both
+    #: melted layouts are "wide" in some direction and the word does not say
+    #: which.
+    layout: Literal["features_in_columns", "periods_in_columns", "long"] = (
+        "features_in_columns"
+    )
     entity: EntitySpec
     event_time: EventTimeSpec
     knowledge_time: KnowledgeTimeSpec
@@ -220,9 +252,33 @@ class StandardiseSpec(Strict):
                 raise ValueError("a long layout needs features.name.column")
             if not self.features.value_column:
                 raise ValueError("a long layout needs features.value_column")
-        else:
+            if self.event_time.from_column_name:
+                raise ValueError("a long layout melts nothing, so no column name is a period")
+        elif self.layout == "features_in_columns":
             if self.features.name.source != "column_name":
-                raise ValueError("a wide layout needs features.name.source = 'column_name'")
+                raise ValueError(
+                    "features_in_columns takes feature names from the column headers, so "
+                    "features.name.source must be 'column_name'"
+                )
+            if self.event_time.from_column_name:
+                raise ValueError(
+                    "the column headers cannot be both feature names and periods"
+                )
+            if not self.event_time.column:
+                raise ValueError("features_in_columns needs event_time.column")
+        else:  # periods_in_columns
+            if not self.event_time.from_column_name:
+                raise ValueError(
+                    "periods_in_columns takes event times from the column headers, so "
+                    "event_time.from_column_name must be true"
+                )
+            if self.features.name.source != "column":
+                raise ValueError(
+                    "periods_in_columns takes feature names from a column, so "
+                    "features.name.source must be 'column'"
+                )
+            if not self.features.name.column:
+                raise ValueError("periods_in_columns needs features.name.column")
         return self
 
 

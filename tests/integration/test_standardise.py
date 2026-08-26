@@ -53,7 +53,7 @@ def _spec(names: dict, **overrides) -> dict:
         "feature_group": names["group"],
         "source": names["source"],
         "retraction_policy": "ignore",
-        "layout": "wide",
+        "layout": "features_in_columns",
         "entity": {"column": "code", "normalise": ["strip", "upper"]},
         "event_time": {
             "column": "date",
@@ -500,3 +500,216 @@ class TestACanonicalSource:
         """It would have nothing to convert, so naming one is a mistake."""
         with pytest.raises(StandardiseError, match="nothing to convert"):
             _run(engine, settings, s3, tmp_path, native)
+
+
+#: One row per (entity, indicator); one column per year. The mirror of PANEL,
+#: which is one row per (entity, date) and one column per indicator.
+PERIODS_PANEL = (
+    "Country Code,Indicator Name,Indicator Code,2020,2021,2022\n"
+    "AAA,Gross domestic product,NY.GDP,1.0,2.0,3.0\n"
+    "AAA,Population,SP.POP,100,200,\n"
+    "ZZZ,Gross domestic product,NY.GDP,9.9,,\n"
+)
+
+
+class TestPeriodsInColumns:
+    """A source whose column headers are years rather than feature names.
+
+    Both melted layouts unpivot columns. What differs is what a header *means*,
+    and therefore which of the seven fields it becomes: a feature name in one
+    case, an event time in the other.
+    """
+
+    @pytest.fixture
+    def periods_spec(self, names) -> dict:
+        return {
+            "feature_group": names["group"],
+            "source": names["source"],
+            "retraction_policy": "ignore",
+            "layout": "periods_in_columns",
+            "entity": {"column": "Country Code", "normalise": ["strip", "upper"]},
+            "event_time": {
+                "from_column_name": True,
+                "format": "%Y",
+                "period": "annual",
+                "anchor": "end",
+            },
+            "knowledge_time": {
+                "basis": "modeled_lag",
+                "declared_lag": "P3M",
+                "lag_anchor_period": "annual",
+            },
+            "features": {
+                "exclude": ["Indicator Name"],
+                "name": {
+                    "source": "column",
+                    "column": "Indicator Code",
+                    "allow_unlisted": True,
+                },
+                "kind": "numeric",
+            },
+            "crosswalk": {"dataset": names["crosswalk"], "version": 1},
+        }
+
+    @pytest.fixture
+    def periods_release(self, engine, settings, s3, tmp_path, names, prepared):
+        path = tmp_path / "periods.csv"
+        # Unique bytes per test, varied inside a data value rather than before
+        # the header: the store is content-addressed, so an identical file
+        # registered under two sources leaves a digest prefix ambiguous.
+        path.write_text(
+            PERIODS_PANEL.replace("Gross domestic product", f"GDP {names['tag']}")
+        )
+        # A second source, so the year-column file has its own release.
+        second = f"{names['source']}_periods"
+        ingest.register_source(
+            engine,
+            settings,
+            name=second,
+            native_namespace=names["namespace"],
+            granularity="annual",
+        )
+        result = ingest.add_release(
+            engine, settings, path=path, source_name=second, released_at=date(2025, 6, 5), s3=s3
+        )
+        return second, result
+
+    def _standardise(self, engine, settings, s3, tmp_path, names, periods_spec, source, digest):
+        from feature_store.spec.standardise import StandardiseSpec
+
+        payload = {**periods_spec, "source": source}
+        return std.standardise(
+            engine,
+            settings,
+            StandardiseSpec.model_validate(payload),
+            digest_prefix=digest,
+            s3=s3,
+            work_dir=tmp_path / "periods_work",
+            memory_limit="2GB",
+        )
+
+    def test_year_columns_become_event_times(
+        self, engine, settings, s3, tmp_path, names, periods_spec, periods_release
+    ):
+        """AAA has three years of GDP and two of population; ZZZ is unmapped."""
+        source, release = periods_release
+        result = self._standardise(
+            engine, settings, s3, tmp_path, names, periods_spec, source, release.sha256[:12]
+        )
+        assert result.rows_written == 5, "3 GDP + 2 population, and the null is not a row"
+
+    def test_the_anchor_puts_a_bare_year_at_its_end(
+        self, engine, settings, s3, tmp_path, names, periods_spec, periods_release
+    ):
+        """A column headed 2020 becomes 2020-12-31, not 2020-01-01.
+
+        The reason is not cosmetic: under a lag the anchor decides what a
+        backtest is allowed to see. See docs/adr/0001.
+        """
+        source, release = periods_release
+        self._standardise(
+            engine, settings, s3, tmp_path, names, periods_spec, source, release.sha256[:12]
+        )
+        with engine.connect() as connection:
+            group_id = connection.execute(
+                sa.select(feature_group.c.id).where(feature_group.c.name == names["group"])
+            ).scalar_one()
+            keys = [p["object_key"] for p in catalog.live_partitions(connection, group_id)]
+        from feature_store.store import duck
+
+        con = duck.connect(settings.storage, memory_limit="1GB")
+        urls = ", ".join(f"'{duck.s3_url(settings.storage.bucket, k)}'" for k in keys)
+        dates = [
+            r[0]
+            for r in con.execute(
+                f"SELECT DISTINCT event_time FROM read_parquet([{urls}]) ORDER BY 1"
+            ).fetchall()
+        ]
+        assert dates == [date(2020, 12, 31), date(2021, 12, 31), date(2022, 12, 31)]
+
+    def test_feature_names_come_from_a_column_not_the_headers(
+        self, engine, settings, s3, tmp_path, names, periods_spec, periods_release
+    ):
+        """The registry must hold indicator codes, never years."""
+        source, release = periods_release
+        self._standardise(
+            engine, settings, s3, tmp_path, names, periods_spec, source, release.sha256[:12]
+        )
+        with engine.connect() as connection:
+            group_id = connection.execute(
+                sa.select(feature_group.c.id).where(feature_group.c.name == names["group"])
+            ).scalar_one()
+            registered = set(
+                connection.execute(
+                    sa.select(feature.c.name).where(feature.c.feature_group_id == group_id)
+                ).scalars().all()
+            )
+        assert registered == {"NY.GDP", "SP.POP"}
+        assert not any(name.isdigit() for name in registered), "a year is not a feature"
+
+    def test_unmapped_entities_are_still_routed(
+        self, engine, settings, s3, tmp_path, names, periods_spec, periods_release
+    ):
+        source, release = periods_release
+        result = self._standardise(
+            engine, settings, s3, tmp_path, names, periods_spec, source, release.sha256[:12]
+        )
+        assert result.unmapped_entities == 1
+
+
+class TestLayoutRefusals:
+    """Each layout has to be coherent, and says so rather than melting nonsense."""
+
+    def _validate(self, **overrides):
+        from feature_store.spec.standardise import StandardiseSpec
+
+        payload = {
+            "feature_group": "g",
+            "source": "s",
+            "layout": "periods_in_columns",
+            "entity": {"column": "code"},
+            "event_time": {"from_column_name": True, "format": "%Y", "period": "annual"},
+            "knowledge_time": {"basis": "file_release", "release_date": "2025-01-01"},
+            "features": {
+                "name": {"source": "column", "column": "indicator", "allow_unlisted": True}
+            },
+        }
+        payload.update(overrides)
+        return StandardiseSpec.model_validate(payload)
+
+    def test_the_valid_shape_is_accepted(self):
+        assert self._validate().layout == "periods_in_columns"
+
+    def test_headers_cannot_be_both_periods_and_features(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="both"):
+            self._validate(
+                layout="features_in_columns",
+                event_time={"from_column_name": True, "column": "year", "period": "annual"},
+            )
+
+    def test_a_period_label_needs_a_period(self):
+        """'irregular' has no boundary, so there is nothing to anchor to."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="irregular"):
+            self._validate(
+                event_time={"from_column_name": True, "format": "%Y", "period": "irregular"}
+            )
+
+    def test_periods_in_columns_needs_a_name_column(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="features.name.source"):
+            self._validate(features={"name": {"source": "column_name"}})
+
+    def test_features_in_columns_needs_an_event_time_column(self):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="event_time"):
+            self._validate(
+                layout="features_in_columns",
+                event_time={"period": "annual"},
+                features={"name": {"source": "column_name", "allow_unlisted": True}},
+            )

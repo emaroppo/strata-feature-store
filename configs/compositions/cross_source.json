@@ -1,0 +1,16 @@
+{
+  "name": "cross_source",
+  "description": "Two publishers on one spine: expert-coded democracy indices from one, national accounts from the other. They share no vocabulary, no cadence and no publication schedule; entity ids were canonicalised at write, so composing them is a union rather than a reconciliation.",
+  "spine": {
+    "entities": { "ids": ["MEX", "DEU", "BRA"] },
+    "times": { "start": "2015-12-31", "end": "2023-12-31", "step": "P1Y" }
+  },
+  "as_of": { "policy": "spine_time" },
+  "features": [
+    { "group": "vdem_cd", "name": "v2x_polyarchy", "alias": "polyarchy" },
+    { "group": "wdi", "name": "NY.GDP.MKTP.KD.ZG", "alias": "gdp_growth", "max_age": "P36M" },
+    { "group": "wdi", "name": "SP.POP.TOTL", "alias": "population" }
+  ],
+  "output": { "orientation": "wide", "include_knowledge_time": true },
+  "freeze": { "mode": "query" }
+}
