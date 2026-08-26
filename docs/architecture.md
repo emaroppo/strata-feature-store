@@ -1,6 +1,6 @@
 # Point-in-Time Feature Store — Architecture
 
-**Status:** design, pre-implementation
+**Status:** implemented and in use; this document is the design it was built against
 **Scope:** offline feature storage, standardisation and retrieval for revised panel data
 
 ---
