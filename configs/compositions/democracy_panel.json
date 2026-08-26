@@ -1,0 +1,16 @@
+{
+  "name": "democracy_panel",
+  "description": "Three democracy indices on an annual spine, read as of each year end. The values that surface are the previous year's: this publisher releases in March, so 2015's figures are not knowable until March 2016.",
+  "spine": {
+    "entities": { "ids": ["MEX", "DEU", "USA", "BRA", "IND"] },
+    "times": { "start": "2010-12-31", "end": "2024-12-31", "step": "P1Y" }
+  },
+  "as_of": { "policy": "spine_time" },
+  "features": [
+    { "group": "vdem_cd", "name": "v2x_polyarchy", "alias": "polyarchy" },
+    { "group": "vdem_cd", "name": "v2x_libdem", "alias": "liberal_democracy" },
+    { "group": "vdem_cd", "name": "v2x_polyarchy_sd", "alias": "polyarchy_sd", "max_age": "P36M" }
+  ],
+  "output": { "orientation": "long" },
+  "freeze": { "mode": "query" }
+}

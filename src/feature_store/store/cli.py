@@ -366,6 +366,168 @@ def standardise_cmd(
     )
 
 
+def _compose_table(rows) -> Table:
+    """Long-format composition rows, with timestamps trimmed to dates.
+
+    A cutoff and a knowledge time both print as full timestamps otherwise,
+    which wraps every row across two lines and makes a panel unreadable.
+    """
+    table = Table(box=None, pad_edge=False)
+    for column in ("entity", "spine", "data_through", "feature", "value", "knowable", "age"):
+        table.add_column(column, overflow="fold")
+
+    def day(value) -> str:
+        return "" if value is None else str(getattr(value, "date", lambda: value)())
+
+    for row in rows:
+        value = row[4] if row[4] is not None else row[5]
+        table.add_row(
+            str(row[0]),
+            day(row[1]),
+            day(row[2]),
+            str(row[3]),
+            "[dim]stale[/dim]" if value is None else f"{value}",
+            day(row[6]),
+            "" if row[7] is None else str(row[7]),
+        )
+    return table
+
+
+@app.command("compose")
+def compose_cmd(
+    spec_file: Path = typer.Option(..., "--spec", exists=True, help="Composition spec."),
+    freeze: str = typer.Option(None, help="query|materialized. Overrides the spec."),
+    preview: int = typer.Option(0, help="Resolve and print N rows, freezing nothing."),
+    memory_limit: str = typer.Option("4GB"),
+    config: Path | None = typer.Option(None),
+) -> None:
+    """Resolve a composition, and pin it so it answers the same way forever."""
+    import json
+
+    from feature_store.spec.compose import ComposeSpec
+    from feature_store.store import compose as cmp
+
+    settings = _settings(config)
+    payload = json.loads(spec_file.read_text())
+    if freeze:
+        payload["freeze"] = {"mode": freeze}
+    try:
+        spec = ComposeSpec.model_validate(payload)
+    except Exception as exc:
+        _fail(f"{spec_file}: {exc}")
+
+    engine = _engine(settings)
+    if preview:
+        try:
+            with engine.connect() as connection:
+                plan = cmp.plan(connection, spec, settings)
+            rows = cmp.resolve(plan, memory_limit=memory_limit).limit(preview).fetchall()
+        except cmp.ComposeError as exc:
+            _fail(str(exc))
+        console.print(_compose_table(rows))
+        err.print(f"[dim]watermark {plan.watermark} — nothing frozen[/dim]")
+        return
+
+    try:
+        frozen = cmp.freeze(engine, settings, spec, memory_limit=memory_limit)
+    except cmp.ComposeError as exc:
+        _fail(str(exc))
+    console.print(
+        f"[green]froze[/green] {spec.name}@{frozen.version_num} "
+        f"({frozen.resolution_mode})\n"
+        f"  rows      {frozen.rows:,}\n"
+        f"  spec      {frozen.content_hash[:16]}\n"
+        f"  watermark {frozen.watermark}"
+        + (f"\n  key       {frozen.object_prefix}" if frozen.object_prefix else ""),
+        soft_wrap=True,
+    )
+
+
+@app.command("read")
+def read_cmd(
+    target: str = typer.Argument(..., help="dataset, or dataset@version."),
+    latest: bool = typer.Option(
+        False, "--latest", help="Ignore the pinned watermark and use everything known now."
+    ),
+    limit: int = typer.Option(20, help="Rows to print. 0 for all."),
+    out: Path | None = typer.Option(None, help="Write parquet here instead of printing."),
+    memory_limit: str = typer.Option("4GB"),
+    config: Path | None = typer.Option(None),
+) -> None:
+    """Resolve a frozen version, warning about anything its pin withholds."""
+    from feature_store.store import compose as cmp
+
+    settings = _settings(config)
+    name, _, version = target.partition("@")
+    try:
+        relation, warning = cmp.read(
+            _engine(settings),
+            settings,
+            name,
+            int(version) if version else None,
+            latest=latest,
+            memory_limit=memory_limit,
+        )
+    except cmp.ComposeError as exc:
+        _fail(str(exc))
+
+    if warning.get("facts"):
+        # Pinning withholds data, so it must not do so silently.
+        err.print(
+            f"[yellow]note:[/yellow] {warning['facts']:,} fact(s) in "
+            f"{', '.join(warning['groups'])} were knowable by {warning['cutoff']} but "
+            f"arrived after this version's watermark, so they are excluded. Newest such "
+            f"knowledge_time: {warning['newest_knowledge_time']}. "
+            f"Freeze a new version to include them, or pass --latest to see both."
+        )
+
+    if out:
+        relation.to_parquet(str(out))
+        console.print(f"[green]wrote[/green] {out}")
+        return
+
+    rows = relation.fetchall() if limit == 0 else relation.limit(limit).fetchall()
+    console.print(_compose_table(rows))
+
+
+@app.command("versions")
+def versions_cmd(
+    name: str = typer.Argument(...),
+    config: Path | None = typer.Option(None),
+) -> None:
+    """Every frozen version of a dataset."""
+    import sqlalchemy as sa
+
+    from feature_store.store.tables import dataset, dataset_version
+
+    settings = _settings(config)
+    with _engine(settings).connect() as connection:
+        rows = (
+            connection.execute(
+                sa.select(dataset_version)
+                .join(dataset, dataset.c.id == dataset_version.c.dataset_id)
+                .where(dataset.c.name == name)
+                .order_by(dataset_version.c.version_num)
+            )
+            .mappings()
+            .all()
+        )
+    if not rows:
+        _fail(f"no dataset named {name!r}")
+    table = Table(box=None, pad_edge=False)
+    for column in ("version", "mode", "spec hash", "watermark", "frozen"):
+        table.add_column(column)
+    for row in rows:
+        table.add_row(
+            str(row["version_num"]),
+            row["resolution_mode"],
+            row["content_hash"][:16],
+            str(row["ingest_watermark"]),
+            f"{row['frozen_at']:%Y-%m-%d %H:%M}",
+        )
+    console.print(table)
+
+
 @runs_app.command("ls")
 def runs_ls(
     limit: int = typer.Option(20),
