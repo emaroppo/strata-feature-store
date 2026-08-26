@@ -133,14 +133,14 @@ def storage_settings():
     return made
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def s3(storage_settings):
     from feature_store.store import objects
 
     return objects.client(storage_settings)
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def settings(migrated_database_url: str, storage_settings):
     from feature_store.store.config import CatalogSettings, Settings
 

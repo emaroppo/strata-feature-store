@@ -360,6 +360,18 @@ only real join left.
 spine needs no resampling logic: the as-of join carries the most recent known value forward
 and updates when the next vintage lands.
 
+**Which fact a spine row gets, stated plainly**, because the alternative reading is
+reasonable and wrong. Resolution answers *what was the latest known value at the cutoff* —
+not *what was the value for the period this row is labelled with*. The join constrains
+knowledge_time against the cutoff and does not constrain event_time against the spine
+timestamp at all. So under a fixed cutoff every spine row for an entity resolves to the same
+figure, whatever period each row names.
+
+That is what makes granularity mismatch free. Constraining event_time to match the spine row
+would leave eleven months of every year empty for an annual indicator, and the carry-forward
+is the entire point. `event_time` travels alongside the value so a reader can always see
+which period the number describes.
+
 **Staleness must be visible.** A value from 2019 and one from last week look identical in
 the output. Carry the resolved `knowledge_time` and a derived `age_days` alongside each
 feature, and support a per-feature `max_age` bound beyond which the value resolves to
