@@ -77,5 +77,26 @@ Production use points `config.toml` at a Garage instance elsewhere.
 
 ## Status
 
-Early. The architecture is settled and written down; the implementation is being
-built against it in order, starting from the catalog.
+Store, standardise and retrieve all work end to end. 336 tests. Two real panels
+are ingested and composable together:
+
+| group | vocabulary | parts | facts |
+|---|---|---|---|
+| `vdem_cd` | iso3166-1-alpha3 | 14 | 122,956,905 |
+| `vdem_cd__unmapped` | vdem-country | 14 | 6,838,466 |
+| `vdem_cd_text` | iso3166-1-alpha3 | 1 | 546,341 |
+| `vdem_cd_text__unmapped` | vdem-country | 1 | 50,671 |
+| `wdi` | iso3166-1-alpha3 | 1 | 7,491,089 |
+| `wdi__unmapped` | wdi-country | 1 | 1,544,314 |
+
+Point-in-time correct queries over that return in well under a second, and
+`verify --deep --orphans` is clean. The `__unmapped` siblings are entity codes
+with no ISO3 equivalent — mostly aggregates like `AFE` ("Africa Eastern and
+Southern") — routed rather than dropped.
+
+Of the 336 tests, 194 need a live Postgres and Garage and so run only against
+the local dev stack; CI covers lint and the 142 pure-core tests. `TODO.md` has
+what is owed, including bringing the rest into CI.
+
+`docs/workflow.md` walks the whole path, from registering a source to a frozen
+dataset version, with the commands that produced the numbers above.

@@ -13,7 +13,7 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv run ruff check .
 
-  tests:
+  unit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,4 +22,11 @@ jobs:
       # interpreter and fails if a database driver or an S3 client came with it.
       # In a dev checkout everything is installed, so this is the only thing
       # standing between the boundary and a convenient import.
-      - run: uv run pytest -q
+      #
+      # Deselected rather than skipped. The integration tests need a Postgres
+      # and a Garage that this runner does not have, and their fixtures skip
+      # when they are missing -- which is invisible in a green check. Running
+      # them here would say "336 tests passed" while 194 of them never
+      # executed. Deselecting says what is true: this job covers lint and the
+      # pure core. See TODO.md for bringing the rest of the suite into CI.
+      - run: uv run pytest -q -m "not integration"
