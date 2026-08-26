@@ -97,3 +97,64 @@ class TestFidelity:
 def test_only_modeled_lag_is_derived():
     """Every other basis materialises the column, so a null there is an error."""
     assert DERIVED == frozenset({"modeled_lag"})
+
+
+class TestEveryBasisIsResolvable:
+    """No basis may leave knowledge_time null unless it derives one.
+
+    A null knowledge_time never satisfies ``kt <= cutoff``, so a group carrying
+    them ingests cleanly, reports its row count, and then composes to an empty
+    panel with nothing indicating why. `ingest_fallback` did exactly that until
+    it was implemented.
+    """
+
+    @pytest.mark.parametrize("basis", [b for b in FIDELITY if b not in DERIVED])
+    def test_a_stored_basis_reads_the_column(self, basis):
+        assert knowledge_time_sql(basis) == "knowledge_time"
+
+    def test_the_derived_basis_is_the_only_one_that_may_be_null(self):
+        """And it is null on disk precisely because the rule replaces it."""
+        assert DERIVED == frozenset({"modeled_lag"})
+
+    @pytest.mark.parametrize("basis", FIDELITY)
+    def test_the_melt_writes_something_for_every_stored_basis(self, basis):
+        """The check that would have caught ingest_fallback.
+
+        Walks each basis through the melt and asserts the knowledge_time
+        expression is not a bare null — for anything that does not derive one
+        at read, a null is a group nobody can query.
+        """
+        from datetime import datetime
+
+        from feature_store.spec.standardise import StandardiseSpec
+        from feature_store.store.standardise import _melt_query
+
+        knowledge: dict = {"basis": basis}
+        if basis == "file_release":
+            knowledge["release_date"] = "2025-03-12"
+        elif basis == "publisher_timestamp":
+            knowledge["column"] = "published_at"
+        elif basis == "modeled_lag":
+            knowledge["declared_lag"] = "P3M"
+
+        parsed = StandardiseSpec.model_validate(
+            {
+                "feature_group": "g",
+                "source": "s",
+                "entity": {"column": "code"},
+                "event_time": {"column": "d", "period": "annual"},
+                "knowledge_time": knowledge,
+                "features": {"name": {"allow_unlisted": True}},
+            }
+        )
+        sql = _melt_query(parsed, "read_csv('x')", ["a"], datetime(2026, 8, 26, 10, 0))
+        line = next(
+            ln.strip() for ln in sql.splitlines() if "AS knowledge_time" in ln
+        )
+        if basis in DERIVED:
+            assert line.startswith("NULL::TIMESTAMP"), "the rule supplies it at read"
+        else:
+            assert not line.startswith("NULL::TIMESTAMP"), (
+                f"{basis} writes a null knowledge_time, so every fact it stores is "
+                "invisible to every as-of query"
+            )

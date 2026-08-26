@@ -134,8 +134,21 @@ def _melt_query(
             "lower": f"lower({entity})",
         }[step]
 
+    # A modeled_lag group is the only one that leaves this null, because it
+    # derives the value at read from a rule in the catalog. Every other basis
+    # writes something, and a basis that wrote nothing would produce facts no
+    # as-of query can ever see: a null knowledge_time never satisfies
+    # `kt <= cutoff`, so the group would ingest cleanly, report its row count,
+    # and then compose to an empty panel with nothing saying why.
     knowledge = "NULL::TIMESTAMP"
-    if spec.knowledge_time.basis == "file_release":
+    if spec.knowledge_time.basis == "ingest_fallback":
+        # The download time. An upper bound on when the value became knowable,
+        # never a measurement of it, which is why this is the lowest fidelity
+        # the store recognises: it withholds data that was genuinely available
+        # earlier, and is wrong in the safe direction rather than the one that
+        # invalidates results.
+        knowledge = f"TIMESTAMP '{ingest_time}'"
+    elif spec.knowledge_time.basis == "file_release":
         knowledge = f"TIMESTAMP '{spec.knowledge_time.release_date} 00:00:00'"
     elif spec.knowledge_time.basis == "publisher_timestamp":
         column = _quote(spec.knowledge_time.column)

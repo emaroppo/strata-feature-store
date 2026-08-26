@@ -43,11 +43,29 @@ class Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+#: Formats the reader can actually open. The type below is wider on purpose:
+#: naming a format the store does not yet read should say so, rather than
+#: reporting it as an unknown word.
+IMPLEMENTED_FORMATS = frozenset({"csv"})
+
+
 class ReaderSpec(Strict):
     format: Literal["csv", "parquet", "json", "xlsx"] = "csv"
     #: Passed to the reader. Kept opaque so a format's own options do not have to
     #: be re-declared here every time one is added.
     options: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _format_is_implemented(self):
+        if self.format not in IMPLEMENTED_FORMATS:
+            raise ValueError(
+                f"reader format {self.format!r} is declared but not implemented: every "
+                f"source is read with read_csv. Only {sorted(IMPLEMENTED_FORMATS)} works "
+                "today. Convert the file, or implement the reader — but do not let this "
+                "through, because a parquet file read as CSV fails in ways that look like "
+                "bad data rather than a missing feature."
+            )
+        return self
 
 
 class EntitySpec(Strict):
@@ -246,15 +264,21 @@ class StandardiseSpec(Strict):
     @model_validator(mode="after")
     def _layout_is_coherent(self):
         if self.layout == "long":
-            if self.features.name.source != "column":
-                raise ValueError("a long layout needs features.name.source = 'column'")
-            if not self.features.name.column:
-                raise ValueError("a long layout needs features.name.column")
-            if not self.features.value_column:
-                raise ValueError("a long layout needs features.value_column")
-            if self.event_time.from_column_name:
-                raise ValueError("a long layout melts nothing, so no column name is a period")
-        elif self.layout == "features_in_columns":
+            # Accepted by the type and unimplemented in the melt, which always
+            # unpivots. A file that is already one row per fact would be
+            # reshaped into nonsense, and nothing would report it.
+            #
+            # Left in the type rather than removed because the shape is real and
+            # will arrive; it is refused until something can read it. The one
+            # source that looked like it would force this turned out to need
+            # periods_in_columns instead, which is a fair warning against
+            # guessing its interface in advance.
+            raise ValueError(
+                "layout 'long' is declared but not implemented: the melt always "
+                "unpivots, so a file already in long form would be reshaped into "
+                "nonsense. Use features_in_columns or periods_in_columns."
+            )
+        if self.layout == "features_in_columns":
             if self.features.name.source != "column_name":
                 raise ValueError(
                     "features_in_columns takes feature names from the column headers, so "

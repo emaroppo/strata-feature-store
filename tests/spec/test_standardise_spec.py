@@ -100,21 +100,11 @@ class TestStrictness:
 
 
 class TestLayout:
-    def test_a_long_layout_needs_a_name_column(self):
-        with pytest.raises(ValidationError, match="name.column"):
-            spec(
-                layout="long",
-                features={"name": {"source": "column"}, "value_column": "v"},
-            )
+    # The `long` layout's coherence checks are gone with it: the layout is
+    # refused outright until the melt can read one, so there is nothing to
+    # validate. See TestUnimplementedIsRefused.
 
-    def test_a_long_layout_needs_a_value_column(self):
-        with pytest.raises(ValidationError, match="value_column"):
-            spec(
-                layout="long",
-                features={"name": {"source": "column", "column": "code"}},
-            )
-
-    def test_a_wide_layout_takes_names_from_columns(self):
+    def test_features_in_columns_takes_names_from_the_headers(self):
         with pytest.raises(ValidationError, match="column_name"):
             spec(features={"name": {"source": "column", "column": "c"}})
 
@@ -199,3 +189,37 @@ class TestSuffixDecomposition:
 
     def test_no_grammar_means_no_structure_claimed(self):
         assert decompose("v2clacjstm_osp_codelow", None) == {"base": "v2clacjstm_osp_codelow"}
+
+
+class TestUnimplementedIsRefused:
+    """The store refuses what it cannot do, rather than doing something else.
+
+    Every one of these validated happily until it was closed, and each failed in
+    a way that looked like data rather than like a missing feature. Refusing an
+    option costs an afternoon; ignoring one costs a result nobody traces back.
+    """
+
+    def test_the_long_layout_is_refused(self):
+        """The melt always unpivots, so a long file would be reshaped to nonsense."""
+        with pytest.raises(ValidationError, match="not implemented"):
+            spec(layout="long")
+
+    @pytest.mark.parametrize("fmt", ["parquet", "json", "xlsx"])
+    def test_unimplemented_readers_are_refused(self, fmt):
+        """Every source is read with read_csv, whatever the config says.
+
+        A parquet file read as CSV does not fail cleanly; it produces garbage
+        that reads like a badly formatted source.
+        """
+        with pytest.raises(ValidationError, match="not implemented"):
+            spec(reader={"format": fmt})
+
+    def test_csv_is_accepted(self):
+        assert spec(reader={"format": "csv"}).reader.format == "csv"
+
+    def test_the_refusal_says_what_to_use_instead(self):
+        """An error that only says no costs a search through the source."""
+        try:
+            spec(layout="long")
+        except ValidationError as exc:
+            assert "features_in_columns" in str(exc)
