@@ -43,7 +43,12 @@ def truncated_store(engine, settings, s3, cutoff: datetime) -> str:
     survivors = [f for f in panel.FACTS if f.knowledge_time <= cutoff]
     if not survivors:
         return ""
-    return panel.build_store(engine, settings, s3, survivors)
+    # The full vocabulary, not just the features that survived. A store that
+    # has not yet received a value for a feature still knows the feature
+    # exists, and truncation is about facts rather than about the schema.
+    return panel.build_store(
+        engine, settings, s3, survivors, vocabulary=panel.FEATURES
+    )
 
 
 #: Each publication moment and both sides of it, plus one cutoff before anything

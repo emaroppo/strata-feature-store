@@ -257,3 +257,97 @@ def live_partitions(
     if feature_group_id is not None:
         query = query.where(feature_partition.c.feature_group_id == feature_group_id)
     return [dict(r) for r in connection.execute(query).mappings().all()]
+
+
+# --------------------------------------------------------------------------
+# entity lists
+
+
+def add_entity_list(
+    run: Run,
+    *,
+    name: str,
+    entity_namespace: str,
+    members: list[str],
+    description: str | None = None,
+) -> tuple[int, int]:
+    """Freeze a named set of entity ids as a new version.
+
+    A bounded exception to holding no entity knowledge: a list of ids is a
+    *selection*, not knowledge about entities. No aliases, no hierarchy, no
+    succession, no attributes, and nothing resolves through it at runtime.
+
+    Versioned because a spec pins one. Redefining "the entities in region R"
+    would otherwise rewrite what an earlier composition meant, which is the same
+    failure that makes crosswalks pinned rather than resolved.
+    """
+    from feature_store.store.tables import entity_list, entity_list_member, entity_list_version
+
+    unique = sorted(set(members))
+    if not unique:
+        raise CatalogError("an entity list with no members selects nothing")
+
+    with run.transaction() as connection:
+        if not namespace_exists(connection, entity_namespace):
+            raise CatalogError(f"entity namespace {entity_namespace!r} is not registered")
+        list_id = connection.execute(
+            sa.select(entity_list.c.id).where(entity_list.c.name == name)
+        ).scalar_one_or_none()
+        if list_id is None:
+            list_id = connection.execute(
+                sa.insert(entity_list)
+                .values(name=name, entity_namespace=entity_namespace, description=description)
+                .returning(entity_list.c.id)
+            ).scalar_one()
+        version_num = (
+            connection.execute(
+                sa.select(
+                    sa.func.coalesce(sa.func.max(entity_list_version.c.version_num), 0)
+                ).where(entity_list_version.c.entity_list_id == list_id)
+            ).scalar_one()
+            + 1
+        )
+        version_id = connection.execute(
+            sa.insert(entity_list_version)
+            .values(
+                entity_list_id=list_id,
+                version_num=version_num,
+                created_by_run_id=run.id,
+            )
+            .returning(entity_list_version.c.id)
+        ).scalar_one()
+        connection.execute(
+            sa.insert(entity_list_member),
+            [{"entity_list_version_id": version_id, "entity_id": e} for e in unique],
+        )
+    run.wrote("entity_list_version", version_id, role="entity_list")
+    return version_id, version_num
+
+
+def list_entity_lists(connection: sa.Connection) -> list[dict[str, Any]]:
+    from feature_store.store.tables import entity_list, entity_list_member, entity_list_version
+
+    members = (
+        sa.select(
+            entity_list_version.c.entity_list_id.label("list_id"),
+            entity_list_version.c.version_num,
+            sa.func.count(entity_list_member.c.entity_id).label("members"),
+        )
+        .join(
+            entity_list_member,
+            entity_list_member.c.entity_list_version_id == entity_list_version.c.id,
+        )
+        .group_by(entity_list_version.c.entity_list_id, entity_list_version.c.version_num)
+        .subquery()
+    )
+    rows = connection.execute(
+        sa.select(
+            entity_list.c.name,
+            entity_list.c.entity_namespace,
+            members.c.version_num,
+            members.c.members,
+        )
+        .join(members, members.c.list_id == entity_list.c.id)
+        .order_by(entity_list.c.name, members.c.version_num)
+    ).mappings().all()
+    return [dict(r) for r in rows]

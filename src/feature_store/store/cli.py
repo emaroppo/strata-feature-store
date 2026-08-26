@@ -528,6 +528,127 @@ def versions_cmd(
     console.print(table)
 
 
+@app.command("verify")
+def verify_cmd(
+    deep: bool = typer.Option(False, "--deep", help="Re-hash bytes and reconcile the registry."),
+    orphans: bool = typer.Option(False, "--orphans", help="Find objects no row points at."),
+    run: int | None = typer.Option(None, "--run", help="Scope to one run's outputs."),
+    config: Path | None = typer.Option(None),
+) -> None:
+    """Check that the catalog and the store agree."""
+    from feature_store.store import verify as verifier
+
+    settings = _settings(config)
+    found = verifier.verify(
+        _engine(settings), settings, deep=deep, orphans=orphans, run_id=run
+    )
+
+    console.print(f"checked [bold]{found.checked}[/bold] catalogued object(s)")
+    for label, items, colour in (
+        ("missing", found.missing, "red"),
+        ("wrong size", found.wrong_size, "red"),
+        ("wrong digest", found.wrong_digest, "red"),
+        ("registry drift", found.registry_drift, "yellow"),
+        ("orphaned", found.orphans, "yellow"),
+        ("from unfinished runs", found.unfinished, "dim"),
+    ):
+        if items:
+            console.print(f"[{colour}]{len(items)} {label}[/{colour}]")
+            for item in items[:10]:
+                console.print(f"    {item}", soft_wrap=True)
+            if len(items) > 10:
+                console.print(f"    [dim]... and {len(items) - 10} more[/dim]")
+    if found.ok:
+        console.print("[green]catalog and store agree[/green]")
+    else:
+        raise typer.Exit(1)
+
+
+@runs_app.command("undo")
+def runs_undo(
+    run_id: int = typer.Argument(...),
+    config: Path | None = typer.Option(None),
+) -> None:
+    """Roll a run's outputs back. Refuses if anything depends on them."""
+    from feature_store.store import verify as verifier
+
+    settings = _settings(config)
+    try:
+        result = verifier.undo(_engine(settings), settings, run_id)
+    except verifier.UndoError as exc:
+        _fail(str(exc))
+    console.print(
+        f"[green]rolled back[/green] run {run_id}: "
+        f"{result['partitions']} partition(s), {len(result['objects_removed'])} object(s) removed"
+    )
+
+
+@release_app.command("prune")
+def release_prune(
+    digest: str = typer.Argument(..., help="Digest, or an unambiguous prefix."),
+    yes: bool = typer.Option(False, "--yes", help="Skip the confirmation."),
+    config: Path | None = typer.Option(None),
+) -> None:
+    """Drop a release's bytes, keeping its row as a tombstone.
+
+    Never automatic. Re-standardising from the original file is the whole reason
+    releases are kept, and this is the one command that gives that up.
+    """
+    from feature_store.store import verify as verifier
+
+    settings = _settings(config)
+    if not yes:
+        err.print(
+            "[yellow]This deletes the original bytes.[/yellow] Re-standardising this "
+            "release becomes impossible without downloading it again, and publishers "
+            "do not always still serve the same vintage. Pass --yes to proceed."
+        )
+        raise typer.Exit(1)
+    try:
+        result = verifier.prune_release(_engine(settings), settings, digest)
+    except verifier.UndoError as exc:
+        _fail(str(exc))
+    console.print(f"[green]pruned[/green] {result['sha256'][:12]}", soft_wrap=True)
+
+
+@app.command("entity-list")
+def entity_list_cmd(
+    name: str = typer.Argument(..., help="What specs will pin, e.g. region_r."),
+    ids: list[str] = typer.Option([], "--id", help="An entity id. Repeatable."),
+    from_file: Path | None = typer.Option(None, help="One id per line."),
+    namespace: str = typer.Option(..., help="The vocabulary these ids belong to."),
+    description: str | None = typer.Option(None),
+    config: Path | None = typer.Option(None),
+) -> None:
+    """Freeze a named set of entity ids as a new version."""
+    from feature_store.store import catalog
+    from feature_store.store.runs import run as open_run
+
+    settings = _settings(config)
+    members = list(ids)
+    if from_file:
+        members += [line.strip() for line in from_file.read_text().splitlines() if line.strip()]
+    if not members:
+        _fail("give at least one --id, or --from-file")
+
+    try:
+        with open_run(
+            _engine(settings), "ingest_release", f"entity list {name}", {"name": name}
+        ) as run:
+            _, version_num = catalog.add_entity_list(
+                run,
+                name=name,
+                entity_namespace=namespace,
+                members=members,
+                description=description,
+            )
+    except catalog.CatalogError as exc:
+        _fail(str(exc))
+    console.print(
+        f"[green]entity list[/green] {name} v{version_num} — {len(set(members))} id(s)"
+    )
+
+
 @runs_app.command("ls")
 def runs_ls(
     limit: int = typer.Option(20),

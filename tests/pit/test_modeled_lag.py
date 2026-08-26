@@ -264,6 +264,7 @@ def test_truncation_holds_for_a_derived_group(engine, settings, s3, derived):
         time_basis="modeled_lag",
         declared_lag=LAG,
         lag_anchor_period="annual",
+        vocabulary=["indicator"],
     )
     assert _rows(engine, settings, derived, cutoff) == _rows(
         engine, settings, truncated, cutoff

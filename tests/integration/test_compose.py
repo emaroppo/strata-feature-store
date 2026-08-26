@@ -85,6 +85,14 @@ def _write_facts(engine, settings, s3, rows, *, group_name, namespace=NAMESPACE)
                     )
                     .returning(feature_group.c.id)
                 ).scalar_one()
+            existing_features = set(
+                connection.execute(
+                    sa.select(sa.text("name")).select_from(sa.text("feature")).where(
+                        sa.text("feature_group_id = :g")
+                    ),
+                    {"g": group_id},
+                ).scalars().all()
+            )
             partition_id = connection.execute(
                 sa.insert(feature_partition)
                 .values(
@@ -99,6 +107,26 @@ def _write_facts(engine, settings, s3, rows, *, group_name, namespace=NAMESPACE)
                 )
                 .returning(feature_partition.c.id)
             ).scalar_one()
+            # The vocabulary registry, which standardise writes and which
+            # composition resolves dtypes from. Registered from the feature
+            # names rather than skipped, because a group without it is not a
+            # faithful stand-in for a real one.
+            from feature_store.store.tables import feature as feature_table
+
+            fresh = sorted({r[4] for r in rows} - existing_features)
+            if fresh:
+                connection.execute(
+                    sa.insert(feature_table),
+                    [
+                        {
+                            "feature_group_id": group_id,
+                            "name": feature_name,
+                            "dtype": "num",
+                            "created_by_run_id": current.id,
+                        }
+                        for feature_name in fresh
+                    ],
+                )
         current.wrote("feature_partition", partition_id)
         current.observed_knowledge_time(max(r[2] for r in rows))
     return group_id

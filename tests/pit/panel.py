@@ -132,6 +132,7 @@ def build_store(
     time_basis: str = "publisher_timestamp",
     declared_lag: str | None = None,
     lag_anchor_period: str | None = None,
+    vocabulary: list[str] | None = None,
 ) -> str:
     """Write *facts* as a real feature group: parquet in the bucket, rows in the catalog.
 
@@ -207,6 +208,33 @@ def build_store(
                 )
                 .returning(feature_partition.c.id)
             ).scalar_one()
+            # The vocabulary registry, which a real group always has because
+            # standardise writes it.
+            #
+            # Registered from the *vocabulary*, not from the facts that happen
+            # to be present. Standardise records a column whether or not this
+            # release had any non-null values in it, so a group knows a feature
+            # exists before it holds any. That distinction is what lets a typo
+            # in a spec fail while a feature with nothing published yet
+            # correctly resolves to null.
+            from feature_store.store.tables import feature as feature_table
+
+            connection.execute(
+                sa.insert(feature_table),
+                [
+                    {
+                        "feature_group_id": group_id,
+                        "name": feature_name,
+                        "dtype": "num",
+                        "created_by_run_id": current.id,
+                    }
+                    for feature_name in (
+                        vocabulary
+                        if vocabulary is not None
+                        else sorted({f.feature_name for f in facts})
+                    )
+                ],
+            )
         current.wrote("feature_partition", partition_id)
         if not declared_lag:
             current.observed_knowledge_time(max(f.knowledge_time for f in facts))

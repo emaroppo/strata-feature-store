@@ -21,7 +21,7 @@ reads of a pinned version warn when that withholds something.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
@@ -53,6 +53,7 @@ class ResolvedGroup:
     #: leaves behind, and those describe part of a group with nothing saying so.
     urls: list[str]
     knowledge_time: str
+    retraction_policy: str = "honour"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +67,11 @@ class Plan:
     watermark: datetime
     namespace: str
     storage: Any = None
+    #: Each selected feature's stored type, from the vocabulary registry. A wide
+    #: output emits one value column per feature rather than both, because a
+    #: numeric feature's string column is null in every row of every panel and
+    #: doubling the column count with guaranteed nulls helps nobody.
+    dtypes: dict = field(default_factory=dict)
 
 
 def _quote_literal(value: str) -> str:
@@ -127,8 +133,10 @@ def plan(connection: sa.Connection, spec: ComposeSpec, settings: Settings) -> Pl
                 table="f",
                 lag_anchor_period=row["lag_anchor_period"],
             ),
+            retraction_policy=row["retraction_policy"],
         )
 
+    dtypes = _resolve_dtypes(connection, spec, groups)
     entities = _resolve_entities(connection, spec, groups, settings)
     times = _resolve_times(spec)
     watermark = _watermark(connection, groups)
@@ -140,7 +148,43 @@ def plan(connection: sa.Connection, spec: ComposeSpec, settings: Settings) -> Pl
         watermark=watermark,
         namespace=settings.canonical_namespace,
         storage=settings.storage,
+        dtypes=dtypes,
     )
+
+
+def _resolve_dtypes(
+    connection: sa.Connection, spec: ComposeSpec, groups: dict[str, ResolvedGroup]
+) -> dict[str, str]:
+    """What each selected feature is stored as, and a refusal if it is unknown.
+
+    The registry is what makes a typo in a feature name fail here rather than
+    resolving to a column of nulls that looks like missing data.
+    """
+    from feature_store.store.tables import feature as feature_table
+
+    out: dict[str, str] = {}
+    for ref in spec.features:
+        dtype = connection.execute(
+            sa.select(feature_table.c.dtype).where(
+                feature_table.c.feature_group_id == groups[ref.group].id,
+                feature_table.c.name == ref.name,
+            )
+        ).scalar_one_or_none()
+        if dtype is None:
+            near = connection.execute(
+                sa.select(feature_table.c.name)
+                .where(
+                    feature_table.c.feature_group_id == groups[ref.group].id,
+                    feature_table.c.name.like(f"{ref.name[:6]}%"),
+                )
+                .limit(5)
+            ).scalars().all()
+            raise ComposeError(
+                f"group {ref.group!r} has no feature named {ref.name!r}."
+                + (f" Did you mean one of {near}?" if near else "")
+            )
+        out[ref.output_name] = dtype
+    return out
 
 
 def _resolve_entities(
@@ -303,27 +347,51 @@ def build_sql(plan: Plan) -> str:
     # and nothing to reconcile.
     facts = "\n        UNION ALL".join(fact_unions)
 
+    # Real calendar arithmetic, not an approximation. Comparing a resolved
+    # knowledge time plus the bound against the cutoff is exact for every month
+    # length; converting months to days is not, and a staleness bound that
+    # drifts by two days a year is a bound nobody can reason about.
     stale_cases = [
         f"WHEN output_name = {_quote_literal(ref.output_name)} "
-        f"AND age_days > {_max_age_days(ref.max_age)} THEN TRUE"
+        f"AND kt + {_age_interval(ref.max_age)} < cutoff THEN TRUE"
         for ref in spec.features
         if ref.max_age
     ]
     stale = f"CASE {' '.join(stale_cases)} ELSE FALSE END" if stale_cases else "FALSE"
 
-    return f"""
+    # Only groups whose publisher withdraws a value by emitting a null. For the
+    # others a null is filler meaning "not reported", and treating it as a
+    # withdrawal would erase a perfectly good earlier figure.
+    honouring = [
+        _quote_literal(ref.group)
+        for ref in spec.features
+        if plan.groups[ref.group].retraction_policy == "honour"
+    ]
+    if honouring:
+        retraction = (
+            "AND NOT (f.value_num IS NULL AND f.value_str IS NULL "
+            f"AND f.group_name NOT IN ({', '.join(sorted(set(honouring)))}))"
+        )
+    else:
+        retraction = "AND NOT (f.value_num IS NULL AND f.value_str IS NULL)"
+
+    body = f"""
     WITH entities(entity_id) AS (VALUES {entity_values}),
     times(spine_time) AS (VALUES {time_values}),
     spine AS ({spine}
     ),
     facts AS ({facts}
     ),
+    visible AS (
+        SELECT * FROM facts f
+        WHERE TRUE {retraction}
+    ),
     matched AS (
         SELECT s.entity_id, s.spine_time, s.output_name, s.cutoff,
                f.value_num, f.value_str, f.kt, f.event_time,
                date_diff('day', f.kt, s.cutoff) AS age_days
         FROM spine s
-        ASOF LEFT JOIN facts f
+        ASOF LEFT JOIN visible f
           ON s.entity_id = f.entity_id
          AND s.group_name = f.group_name
          AND s.feature_name = f.feature_name
@@ -331,35 +399,101 @@ def build_sql(plan: Plan) -> str:
     ),
     aged AS (
         SELECT *, {stale} AS stale FROM matched
-    )
-    SELECT
-        entity_id,
-        spine_time,
-        cutoff AS data_through,
-        output_name AS feature_name,
-        -- Staleness nulls the value and its metadata together. Applied before
-        -- any pivot, so a nulled value takes its age with it rather than
-        -- leaving an age beside an empty cell.
-        CASE WHEN stale THEN NULL ELSE value_num END AS value_num,
-        CASE WHEN stale THEN NULL ELSE value_str END AS value_str,
-        CASE WHEN stale THEN NULL ELSE kt END AS knowledge_time,
-        CASE WHEN stale THEN NULL ELSE age_days END AS age_days,
-        CASE WHEN stale THEN NULL ELSE event_time END AS event_time
-    FROM aged
-    ORDER BY entity_id, spine_time, output_name
+    ),
+    resolved AS (
+        SELECT
+            entity_id,
+            spine_time,
+            cutoff AS data_through,
+            output_name AS feature_name,
+            -- Staleness nulls the value and its metadata together. Applied
+            -- before any pivot, so a nulled value takes its age with it rather
+            -- than leaving an age beside an empty cell.
+            CASE WHEN stale THEN NULL ELSE value_num END AS value_num,
+            CASE WHEN stale THEN NULL ELSE value_str END AS value_str,
+            CASE WHEN stale THEN NULL ELSE kt END AS knowledge_time,
+            CASE WHEN stale THEN NULL ELSE age_days END AS age_days,
+            CASE WHEN stale THEN NULL ELSE event_time END AS event_time
+        FROM aged
+    )"""
+
+    if spec.output.orientation == "wide":
+        return body + _wide_select(plan)
+    return body + _long_select(spec)
+
+
+def _long_select(spec: ComposeSpec) -> str:
+    """One row per sample, which is what the store holds."""
+    columns = ["entity_id", "spine_time"]
+    if spec.output.include_data_through:
+        columns.append("data_through")
+    columns += ["feature_name", "value_num", "value_str"]
+    if spec.output.include_knowledge_time:
+        columns.append("knowledge_time")
+    if spec.output.include_age_days:
+        columns.append("age_days")
+    columns.append("event_time")
+    return f"""
+    SELECT {", ".join(columns)} FROM resolved
+    ORDER BY entity_id, spine_time, feature_name
     """
 
 
-def _max_age_days(max_age: str) -> int:
-    """A staleness bound in whole days.
+def _wide_select(plan: Plan) -> str:
+    """The same samples, pivoted so observations are rows and features columns.
 
-    Months become days here, which is an approximation the store does not make
-    anywhere else. It is acceptable because a staleness bound is a judgement
-    about roughly how old is too old, not an arithmetic claim — but the
-    approximation is stated rather than hidden.
+    Written out explicitly rather than with DuckDB's PIVOT, because the column
+    set has to be exactly what the spec asked for, in that order, whether or not
+    a feature happened to resolve to anything. A dynamic pivot infers its
+    columns from the data, so a feature that resolved to nothing for every row
+    would silently vanish from the output.
+
+    Wide is a presentation of the same samples: an output covering n
+    observations and f features holds n x f samples either way.
     """
+    spec = plan.spec
+    columns = ["entity_id", "spine_time"]
+    if spec.output.include_data_through:
+        columns.append("any_value(data_through) AS data_through")
+    for ref in spec.features:
+        name = ref.output_name
+        quoted = _quote_literal(name)
+        source = "value_str" if plan.dtypes.get(name) == "str" else "value_num"
+        columns.append(
+            f"max(CASE WHEN feature_name = {quoted} THEN {source} END) AS {_quote_ident(name)}"
+        )
+        if spec.output.include_knowledge_time:
+            columns.append(
+                f"max(CASE WHEN feature_name = {quoted} THEN knowledge_time END) "
+                f"AS {_quote_ident(name + '__knowledge_time')}"
+            )
+        if spec.output.include_age_days:
+            columns.append(
+                f"max(CASE WHEN feature_name = {quoted} THEN age_days END) "
+                f"AS {_quote_ident(name + '__age_days')}"
+            )
+    return f"""
+    SELECT {", ".join(columns)}
+    FROM resolved
+    GROUP BY entity_id, spine_time
+    ORDER BY entity_id, spine_time
+    """
+
+
+def _quote_ident(name: str) -> str:
+    escaped = name.replace('"', '""')
+    return f'"{escaped}"'
+
+
+def _age_interval(max_age: str) -> str:
+    """A staleness bound as a DuckDB interval, months and days kept apart."""
     duration = parse_duration(max_age)
-    return duration.months * 30 + duration.days
+    terms = []
+    if duration.months:
+        terms.append(f"INTERVAL '{duration.months} months'")
+    if duration.days:
+        terms.append(f"INTERVAL '{duration.days} days'")
+    return " + ".join(terms)
 
 
 def resolve(plan: Plan, connection=None, memory_limit: str = "4GB"):
