@@ -399,13 +399,30 @@ class TestRefusals:
                 sa.select(feature_group.c.id).where(feature_group.c.name == revised)
             ).scalar_one()
             connection.execute(
-                sa.text("update run set status='running' where id in "
-                        "(select created_by_run_id from feature_partition where "
-                        "feature_group_id = :g)"),
+                sa.text(
+                    "update run set status='running' where id in "
+                    "(select created_by_run_id from feature_partition where "
+                    "feature_group_id = :g)"
+                ),
                 {"g": group_id},
             )
-        with pytest.raises(ComposeError, match="never finished"):
-            _resolve(engine, settings, _spec(revised))
+        try:
+            with pytest.raises(ComposeError, match="never finished"):
+                _resolve(engine, settings, _spec(revised))
+        finally:
+            # Put the run back. A run left `running` blocks prune_orphans for
+            # the rest of the session, correctly: bytes are written before their
+            # catalog row, so an unfinished run means an object that has landed
+            # and not yet been recorded is indistinguishable from an orphan.
+            with engine.begin() as connection:
+                connection.execute(
+                    sa.text(
+                        "update run set status='ok' where id in "
+                        "(select created_by_run_id from feature_partition where "
+                        "feature_group_id = :g)"
+                    ),
+                    {"g": group_id},
+                )
 
 
 def test_read_writes_parquet_to_a_path(engine, settings, s3, revised, tmp_path):

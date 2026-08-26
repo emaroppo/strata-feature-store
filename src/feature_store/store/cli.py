@@ -532,13 +532,42 @@ def versions_cmd(
 def verify_cmd(
     deep: bool = typer.Option(False, "--deep", help="Re-hash bytes and reconcile the registry."),
     orphans: bool = typer.Option(False, "--orphans", help="Find objects no row points at."),
+    prune_orphans: bool = typer.Option(
+        False, "--prune-orphans", help="Delete them. Refuses unless the rest of the store agrees."
+    ),
     run: int | None = typer.Option(None, "--run", help="Scope to one run's outputs."),
+    yes: bool = typer.Option(False, "--yes", help="Skip the confirmation for --prune-orphans."),
     config: Path | None = typer.Option(None),
 ) -> None:
     """Check that the catalog and the store agree."""
     from feature_store.store import verify as verifier
 
     settings = _settings(config)
+
+    if prune_orphans:
+        try:
+            preview = verifier.prune_orphans(_engine(settings), settings, dry_run=True)
+        except verifier.UndoError as exc:
+            _fail(str(exc))
+        count = len(preview["would_remove"])
+        if not count:
+            console.print("[green]no orphans to remove[/green]")
+            return
+        if not yes:
+            err.print(
+                f"[yellow]{count} object(s) would be deleted.[/yellow] They are the ones "
+                "no catalog row points at — debris from runs that died between writing "
+                "bytes and recording them. Pass --yes to proceed."
+            )
+            for key in preview["would_remove"][:5]:
+                err.print(f"    {key}", soft_wrap=True)
+            if count > 5:
+                err.print(f"    [dim]... and {count - 5} more[/dim]")
+            raise typer.Exit(1)
+        result = verifier.prune_orphans(_engine(settings), settings)
+        console.print(f"[green]removed[/green] {len(result['removed'])} orphaned object(s)")
+        return
+
     found = verifier.verify(
         _engine(settings), settings, deep=deep, orphans=orphans, run_id=run
     )

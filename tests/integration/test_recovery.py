@@ -37,6 +37,27 @@ def _facts(feature: str = "gdp") -> list[panel.Fact]:
 
 
 @pytest.fixture
+def forget(engine, s3, settings):
+    """Drop a release row and its object, so a damaged one stops being damage.
+
+    Several tests below deliberately break an object to prove verify notices.
+    Left in place, that damage persists for the rest of the session — and
+    `prune_orphans` then refuses, correctly, because an orphan list computed
+    against a store nobody understands is not one to act on. A test that breaks
+    something on purpose has to put it back.
+    """
+
+    def clean(release_id: int, key: str) -> None:
+        with engine.begin() as connection:
+            connection.execute(
+                sa.delete(release_table).where(release_table.c.id == release_id)
+            )
+        objects.delete(s3, settings.storage.bucket, key)
+
+    return clean
+
+
+@pytest.fixture
 def a_release(engine, settings, s3, tmp_path):
     """A registered source with one stored release."""
     tag = uuid.uuid4().hex[:8]
@@ -62,12 +83,15 @@ class TestVerify:
         assert found.ok
         assert found.checked > 0, "and actually looked at something"
 
-    def test_a_deleted_object_is_reported_missing(self, engine, settings, s3, a_release):
+    def test_a_deleted_object_is_reported_missing(self, engine, settings, s3, a_release, forget):
         """The catalog claiming bytes that are not there is the bad direction."""
         objects.delete(s3, settings.storage.bucket, a_release.object_key)
-        found = verify.verify(engine, settings, s3=s3)
-        assert a_release.object_key in found.missing
-        assert not found.ok
+        try:
+            found = verify.verify(engine, settings, s3=s3)
+            assert a_release.object_key in found.missing
+            assert not found.ok
+        finally:
+            forget(a_release.release_id, a_release.object_key)
 
     def test_an_orphan_is_found(self, engine, settings, s3):
         """Invariant 3's recovery story, exercised rather than assumed.
@@ -83,13 +107,16 @@ class TestVerify:
         finally:
             objects.delete(s3, settings.storage.bucket, key)
 
-    def test_a_truncated_object_is_reported(self, engine, settings, s3, a_release):
+    def test_a_truncated_object_is_reported(self, engine, settings, s3, a_release, forget):
         """Present but wrong is worse than absent, because it reads fine."""
         objects.put_bytes(s3, settings.storage.bucket, a_release.object_key, b"short")
-        found = verify.verify(engine, settings, s3=s3)
-        assert any(a_release.object_key in item for item in found.wrong_size)
+        try:
+            found = verify.verify(engine, settings, s3=s3)
+            assert any(a_release.object_key in item for item in found.wrong_size)
+        finally:
+            forget(a_release.release_id, a_release.object_key)
 
-    def test_deep_catches_bytes_that_do_not_hash(self, engine, settings, s3, a_release):
+    def test_deep_catches_bytes_that_do_not_hash(self, engine, settings, s3, a_release, forget):
         """Same length, different content: only a re-hash notices."""
         original = objects.head(s3, settings.storage.bucket, a_release.object_key)
         objects.put_bytes(
@@ -98,10 +125,15 @@ class TestVerify:
             a_release.object_key,
             b"x" * original["ContentLength"],
         )
-        found = verify.verify(engine, settings, deep=True, s3=s3)
-        assert any(a_release.object_key in item for item in found.wrong_digest)
+        try:
+            found = verify.verify(engine, settings, deep=True, s3=s3)
+            assert any(a_release.object_key in item for item in found.wrong_digest)
+        finally:
+            forget(a_release.release_id, a_release.object_key)
 
     def test_a_fact_the_registry_does_not_know_is_drift(self, engine, settings, s3):
+        # Leaves drift behind on purpose; see TestPruneOrphans, which runs after
+        # and asserts that prune refuses while the catalog disagrees.
         """The direction that matters: data the vocabulary has lost track of.
 
         Nothing can discover the feature, and a spec naming it is refused even
@@ -115,15 +147,29 @@ class TestVerify:
             group_id = connection.execute(
                 sa.select(feature_group.c.id).where(feature_group.c.name == name)
             ).scalar_one()
+            run_id = connection.execute(sa.select(sa.func.max(run_table.c.id))).scalar_one()
             connection.execute(
                 sa.delete(feature_table).where(
                     feature_table.c.feature_group_id == group_id,
                     feature_table.c.name == "orphaned_feature",
                 )
             )
-        found = verify.verify(engine, settings, deep=True, s3=s3)
-        assert any("orphaned_feature" in item for item in found.registry_drift)
-        assert not found.ok
+        try:
+            found = verify.verify(engine, settings, deep=True, s3=s3)
+            assert any("orphaned_feature" in item for item in found.registry_drift)
+            assert not found.ok
+        finally:
+            # Put the vocabulary back. Drift left behind is drift every later
+            # test sees, and prune_orphans refuses while the catalog disagrees.
+            with engine.begin() as connection:
+                connection.execute(
+                    sa.insert(feature_table).values(
+                        feature_group_id=group_id,
+                        name="orphaned_feature",
+                        dtype="num",
+                        created_by_run_id=run_id,
+                    )
+                )
 
     def test_a_registry_row_without_facts_is_not_drift(self, engine, settings, s3):
         """The ordinary state of a feature nobody has published yet.
@@ -327,3 +373,89 @@ def test_a_partition_orphaned_by_undo_is_found_by_verify(engine, settings, s3):
     found = verify.verify(engine, settings, orphans=True, s3=s3)
     assert partition["object_key"] in found.orphans
     objects.delete(s3, settings.storage.bucket, partition["object_key"])
+
+
+class TestPruneOrphans:
+    """Deleting debris, and refusing to when the picture is not trustworthy."""
+
+    def _plant(self, s3, settings, suffix: str = "") -> str:
+        key = (
+            f"features/orphan_{uuid.uuid4().hex[:8]}{suffix}/"
+            f"entity_namespace=x/part-dead.parquet"
+        )
+        objects.put_bytes(s3, settings.storage.bucket, key, b"debris")
+        return key
+
+    def test_it_removes_what_verify_listed(self, engine, settings, s3, a_release):
+        """Every planted orphan goes. Other tests leave their own debris in the
+        shared bucket, so this checks containment rather than equality — the
+        claim is that nothing planted survives, not that nothing else existed.
+        """
+        planted = [self._plant(s3, settings) for _ in range(3)]
+        result = verify.prune_orphans(engine, settings, s3=s3)
+
+        assert set(planted) <= set(result["removed"])
+        for key in planted:
+            assert not objects.exists(s3, settings.storage.bucket, key)
+
+    def test_catalogued_objects_are_untouched(self, engine, settings, s3, a_release):
+        """The failure that would matter: deleting something live."""
+        self._plant(s3, settings)
+        verify.prune_orphans(engine, settings, s3=s3)
+        assert objects.exists(s3, settings.storage.bucket, a_release.object_key)
+        assert verify.verify(engine, settings, s3=s3).ok
+
+    def test_a_dry_run_deletes_nothing(self, engine, settings, s3, a_release):
+        key = self._plant(s3, settings)
+        result = verify.prune_orphans(engine, settings, s3=s3, dry_run=True)
+        assert key in result["would_remove"]
+        assert result["removed"] == []
+        assert objects.exists(s3, settings.storage.bucket, key)
+
+    def test_it_refuses_while_a_run_is_in_progress(self, engine, settings, s3, a_release):
+        """The refusal that matters most.
+
+        Bytes are written before their catalog row, so a part that has landed
+        and not yet been recorded is indistinguishable from an orphan by
+        inspection. Pruning during a standardise would delete the work it is in
+        the middle of doing.
+        """
+        self._plant(s3, settings)
+        with open_run(engine, "standardise", "still going", {}) as run:
+            run.wrote("feature_partition", 999_123)
+            with pytest.raises(verify.UndoError, match="still in progress"):
+                verify.prune_orphans(engine, settings, s3=s3)
+
+    def test_a_finished_run_does_not_block_it(self, engine, settings, s3, a_release):
+        key = self._plant(s3, settings)
+        with open_run(engine, "standardise", "done", {}) as run:
+            run.wrote("feature_partition", 999_124)
+        result = verify.prune_orphans(engine, settings, s3=s3)
+        assert key in result["removed"]
+
+    def test_it_refuses_when_the_catalog_disagrees(
+        self, engine, settings, s3, a_release, forget
+    ):
+        """An orphan list computed against a broken store is not one to act on."""
+        self._plant(s3, settings)
+        objects.delete(s3, settings.storage.bucket, a_release.object_key)
+        try:
+            with pytest.raises(verify.UndoError, match="disagree"):
+                verify.prune_orphans(engine, settings, s3=s3)
+        finally:
+            # The damage was the point of the test, so it has to go with it.
+            forget(a_release.release_id, a_release.object_key)
+
+    def test_debris_from_a_failed_run_is_removed(self, engine, settings, s3, a_release):
+        """Those runs are over, and what they left is what this exists to clear."""
+        key = self._plant(s3, settings)
+        with pytest.raises(ValueError):
+            with open_run(engine, "standardise", "died", {}) as run:
+                run.wrote("feature_partition", 999_125)
+                raise ValueError("mid-write")
+        result = verify.prune_orphans(engine, settings, s3=s3)
+        assert key in result["removed"]
+
+    def test_nothing_to_do_is_not_an_error(self, engine, settings, s3, a_release):
+        verify.prune_orphans(engine, settings, s3=s3)
+        assert verify.prune_orphans(engine, settings, s3=s3)["removed"] == []

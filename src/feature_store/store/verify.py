@@ -338,3 +338,70 @@ def prune_release(engine: sa.Engine, settings: Settings, digest_prefix: str, *, 
         )
     objects.delete(s3, settings.storage.bucket, found["object_key"])
     return {"sha256": found["sha256"], "object_key": found["object_key"]}
+
+
+def prune_orphans(
+    engine: sa.Engine,
+    settings: Settings,
+    *,
+    s3=None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Delete objects no catalog row points at.
+
+    Deletes **exactly** what :func:`verify` just listed and nothing inferred
+    from it, because the whole risk here is deleting something live that merely
+    looked orphaned.
+
+    Two refusals, and the second is the one that matters:
+
+    **The catalog and store must otherwise agree.** An orphan list computed
+    while rows are missing or digests are wrong is a list computed against a
+    store nobody understands yet, and the right response to that is to look, not
+    to delete.
+
+    **No run may be in progress.** Invariant 3 uploads bytes before writing the
+    row, so a part that has landed and not yet been recorded is indistinguishable
+    from an orphan by inspection. Pruning during a standardise would delete the
+    work it is in the middle of doing. A `running` run is the only signal that
+    window is open, so it is a hard stop rather than a warning.
+
+    Objects from `failed` and `rolled_back` runs *are* genuinely orphaned and are
+    removed: those runs are over, and what they left behind is what this exists
+    to clear.
+    """
+    s3 = s3 or objects.client(settings.storage)
+
+    with engine.connect() as connection:
+        in_flight = connection.execute(
+            sa.select(run_table.c.id, run_table.c.kind, run_table.c.name)
+            .where(run_table.c.status == "running")
+            .order_by(run_table.c.id)
+        ).mappings().all()
+    if in_flight:
+        raise UndoError(
+            f"{len(in_flight)} run(s) still in progress "
+            f"({', '.join(str(r['id']) for r in in_flight[:5])}). Bytes are written before "
+            "their catalog row, so a part that has landed and not yet been recorded looks "
+            "exactly like an orphan. Wait for them to finish, or mark them failed if they "
+            "died, and run this again."
+        )
+
+    found = verify(engine, settings, orphans=True, s3=s3)
+    if not found.ok:
+        raise UndoError(
+            "the catalog and the store disagree "
+            f"({len(found.missing)} missing, {len(found.wrong_size)} wrong size, "
+            f"{len(found.wrong_digest)} wrong digest, {len(found.registry_drift)} drift). "
+            "Refusing to delete anything until that is understood: an orphan list computed "
+            "against a store in this state is not one to act on."
+        )
+
+    if dry_run:
+        return {"would_remove": list(found.orphans), "removed": [], "checked": found.checked}
+
+    removed = []
+    for key in found.orphans:
+        objects.delete(s3, settings.storage.bucket, key)
+        removed.append(key)
+    return {"would_remove": [], "removed": removed, "checked": found.checked}
