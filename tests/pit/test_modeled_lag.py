@@ -60,9 +60,7 @@ def _facts(materialised: bool) -> list[panel.Fact]:
 @pytest.fixture(scope="module")
 def stored(engine, settings, s3) -> str:
     """Knowledge times materialised into the parquet."""
-    return panel.build_store(
-        engine, settings, s3, _facts(True), time_basis="publisher_timestamp"
-    )
+    return panel.build_store(engine, settings, s3, _facts(True), time_basis="publisher_timestamp")
 
 
 @pytest.fixture(scope="module")
@@ -98,9 +96,7 @@ def _spec(group: str, cutoff: datetime):
 def _rows(engine, settings, group: str, cutoff: datetime):
     with engine.connect() as connection:
         plan = compose.plan(connection, _spec(group, cutoff), settings)
-    return sorted(
-        (r[0], str(r[1]), r[4], str(r[6])) for r in compose.resolve(plan).fetchall()
-    )
+    return sorted((r[0], str(r[1]), r[4], str(r[6])) for r in compose.resolve(plan).fetchall())
 
 
 CUTOFFS = [
@@ -116,9 +112,9 @@ CUTOFFS = [
 @pytest.mark.parametrize("cutoff", CUTOFFS, ids=lambda c: c.strftime("%Y%m%d"))
 def test_derived_equals_stored(engine, settings, stored, derived, cutoff):
     """Deriving a knowledge time must answer as if it had been written down."""
-    assert _rows(engine, settings, derived, cutoff) == _rows(
-        engine, settings, stored, cutoff
-    ), f"the derived and stored groups disagree as of {cutoff}"
+    assert _rows(engine, settings, derived, cutoff) == _rows(engine, settings, stored, cutoff), (
+        f"the derived and stored groups disagree as of {cutoff}"
+    )
 
 
 def test_the_derived_time_is_the_publication_date(engine, settings, derived):
@@ -127,6 +123,7 @@ def test_the_derived_time_is_the_publication_date(engine, settings, derived):
     Both fixtures could be wrong in the same way, so the value is pinned
     independently: a 2021 figure becomes knowable on 12 March 2022.
     """
+
     # Values encode their own event year: index * 100 + year. So the value tells
     # you which vintage surfaced, which is what actually needs checking — the
     # spine row is the same on both sides of the boundary.
@@ -251,11 +248,7 @@ def test_truncation_holds_for_a_derived_group(engine, settings, s3, derived):
     read agree about what that time is.
     """
     cutoff = datetime(2022, 3, 12)
-    survivors = [
-        f
-        for f in _facts(False)
-        if datetime(f.event_time.year + 1, 3, 12) <= cutoff
-    ]
+    survivors = [f for f in _facts(False) if datetime(f.event_time.year + 1, 3, 12) <= cutoff]
     truncated = panel.build_store(
         engine,
         settings,
@@ -266,9 +259,7 @@ def test_truncation_holds_for_a_derived_group(engine, settings, s3, derived):
         lag_anchor_period="annual",
         vocabulary=["indicator"],
     )
-    assert _rows(engine, settings, derived, cutoff) == _rows(
-        engine, settings, truncated, cutoff
-    )
+    assert _rows(engine, settings, derived, cutoff) == _rows(engine, settings, truncated, cutoff)
 
 
 def test_a_partition_records_no_max_knowledge_time_when_derived(engine, derived):
@@ -277,9 +268,13 @@ def test_a_partition_records_no_max_knowledge_time_when_derived(engine, derived)
         group_id = connection.execute(
             sa.select(feature_group.c.id).where(feature_group.c.name == derived)
         ).scalar_one()
-        values = connection.execute(
-            sa.select(feature_partition.c.max_knowledge_time).where(
-                feature_partition.c.feature_group_id == group_id
+        values = (
+            connection.execute(
+                sa.select(feature_partition.c.max_knowledge_time).where(
+                    feature_partition.c.feature_group_id == group_id
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
     assert values and all(v is None for v in values)

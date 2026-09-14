@@ -571,9 +571,7 @@ def verify_cmd(
         console.print(f"[green]removed[/green] {len(result['removed'])} orphaned object(s)")
         return
 
-    found = verifier.verify(
-        _engine(settings), settings, deep=deep, orphans=orphans, run_id=run
-    )
+    found = verifier.verify(_engine(settings), settings, deep=deep, orphans=orphans, run_id=run)
 
     console.print(f"checked [bold]{found.checked}[/bold] catalogued object(s)")
     for label, items, colour in (
@@ -676,9 +674,7 @@ def entity_list_cmd(
             )
     except catalog.CatalogError as exc:
         _fail(str(exc))
-    console.print(
-        f"[green]entity list[/green] {name} v{version_num} — {len(set(members))} id(s)"
-    )
+    console.print(f"[green]entity list[/green] {name} v{version_num} — {len(set(members))} id(s)")
 
 
 @runs_app.command("ls")

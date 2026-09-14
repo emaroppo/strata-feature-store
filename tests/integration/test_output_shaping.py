@@ -79,9 +79,7 @@ class TestOrientation:
         assert len(rows) == 4, "two spine rows times two features"
 
     def test_wide_is_one_row_per_observation(self, engine, settings, group):
-        rows = _relation(
-            engine, settings, _spec(group, output={"orientation": "wide"})
-        ).fetchall()
+        rows = _relation(engine, settings, _spec(group, output={"orientation": "wide"})).fetchall()
         assert len(rows) == 2, "the same four samples, presented as two rows"
 
     def test_wide_names_a_column_per_feature(self, engine, settings, group):
@@ -107,14 +105,10 @@ class TestOrientation:
         # test agree with itself rather than with the output.
         value_at = [wide.columns.index(name) for name in ("gdp", "pop")]
         long_values = sorted(r[4] for r in long_rows if r[4] is not None)
-        wide_values = sorted(
-            row[i] for row in wide_rows for i in value_at if row[i] is not None
-        )
+        wide_values = sorted(row[i] for row in wide_rows for i in value_at if row[i] is not None)
         assert long_values == wide_values
 
-    def test_a_feature_that_resolved_to_nothing_still_gets_a_column(
-        self, engine, settings, group
-    ):
+    def test_a_feature_that_resolved_to_nothing_still_gets_a_column(self, engine, settings, group):
         """Written out explicitly rather than with a dynamic PIVOT.
 
         DuckDB's PIVOT infers its columns from the data, so a feature that

@@ -348,14 +348,18 @@ def list_entity_lists(connection: sa.Connection) -> list[dict[str, Any]]:
         .group_by(entity_list_version.c.entity_list_id, entity_list_version.c.version_num)
         .subquery()
     )
-    rows = connection.execute(
-        sa.select(
-            entity_list.c.name,
-            entity_list.c.entity_namespace,
-            members.c.version_num,
-            members.c.members,
+    rows = (
+        connection.execute(
+            sa.select(
+                entity_list.c.name,
+                entity_list.c.entity_namespace,
+                members.c.version_num,
+                members.c.members,
+            )
+            .join(members, members.c.list_id == entity_list.c.id)
+            .order_by(entity_list.c.name, members.c.version_num)
         )
-        .join(members, members.c.list_id == entity_list.c.id)
-        .order_by(entity_list.c.name, members.c.version_num)
-    ).mappings().all()
+        .mappings()
+        .all()
+    )
     return [dict(r) for r in rows]

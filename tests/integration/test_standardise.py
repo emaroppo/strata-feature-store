@@ -198,9 +198,7 @@ class TestTheMelt:
             keys = [p["object_key"] for p in catalog.live_partitions(connection, group_id)]
         rows = _facts(settings, s3, keys)
         assert ("BBB", date(2020, 12, 31), "pop", None, None) not in rows
-        assert [r for r in rows if r[0] == "BBB"] == [
-            ("BBB", date(2020, 12, 31), "gdp", 3.0, None)
-        ]
+        assert [r for r in rows if r[0] == "BBB"] == [("BBB", date(2020, 12, 31), "gdp", 3.0, None)]
 
     def test_knowledge_time_is_null_and_derived_at_read(
         self, engine, settings, s3, tmp_path, names, prepared
@@ -254,9 +252,7 @@ class TestTheMelt:
 
 
 class TestUnmappedEntities:
-    def test_are_routed_rather_than_dropped(
-        self, engine, settings, s3, tmp_path, names, prepared
-    ):
+    def test_are_routed_rather_than_dropped(self, engine, settings, s3, tmp_path, names, prepared):
         """ZZZ has no canonical id. Losing it silently is the failure to avoid."""
         _run(engine, settings, s3, tmp_path, names)
         with engine.connect() as connection:
@@ -283,9 +279,7 @@ class TestUnmappedEntities:
             rows = (
                 connection.execute(
                     sa.select(feature_group.c.name, feature_group.c.entity_namespace).where(
-                        feature_group.c.name.in_(
-                            [names["group"], f"{names['group']}__unmapped"]
-                        )
+                        feature_group.c.name.in_([names["group"], f"{names['group']}__unmapped"])
                     )
                 )
                 .mappings()
@@ -437,9 +431,7 @@ def test_parts_are_sorted_by_feature_name(engine, settings, s3, tmp_path, names,
     assert ordered == sorted(ordered)
 
 
-def test_the_object_exists_where_the_catalog_says(
-    engine, settings, s3, tmp_path, names, prepared
-):
+def test_the_object_exists_where_the_catalog_says(engine, settings, s3, tmp_path, names, prepared):
     """Invariant 3 from the other side: no row points at bytes that are absent."""
     result = _run(engine, settings, s3, tmp_path, names)
     assert objects.exists(s3, settings.storage.bucket, result.object_key)
@@ -477,9 +469,7 @@ class TestACanonicalSource:
         )
         return names
 
-    def test_it_standardises_without_a_crosswalk(
-        self, engine, settings, s3, tmp_path, native
-    ):
+    def test_it_standardises_without_a_crosswalk(self, engine, settings, s3, tmp_path, native):
         result = _run(engine, settings, s3, tmp_path, native, crosswalk=None)
         # Every entity is canonical by definition, including the one the
         # crosswalk fixture would have left unmapped.
@@ -519,9 +509,7 @@ def periods_release(engine, settings, s3, tmp_path, names, prepared):
     # Unique bytes per test, varied inside a data value rather than before
     # the header: the store is content-addressed, so an identical file
     # registered under two sources leaves a digest prefix ambiguous.
-    path.write_text(
-        PERIODS_PANEL.replace("Gross domestic product", f"GDP {names['tag']}")
-    )
+    path.write_text(PERIODS_PANEL.replace("Gross domestic product", f"GDP {names['tag']}"))
     # A second source, so the year-column file has its own release.
     second = f"{names['source']}_periods"
     ingest.register_source(
@@ -644,7 +632,9 @@ class TestPeriodsInColumns:
             registered = set(
                 connection.execute(
                     sa.select(feature.c.name).where(feature.c.feature_group_id == group_id)
-                ).scalars().all()
+                )
+                .scalars()
+                .all()
             )
         assert registered == {"NY.GDP", "SP.POP"}
         assert not any(name.isdigit() for name in registered), "a year is not a feature"
@@ -783,9 +773,7 @@ class TestVocabulary:
         return std.standardise(
             engine,
             settings,
-            StandardiseSpec.model_validate(
-                self._spec(names, source, vocab.sha256[:12])
-            ),
+            StandardiseSpec.model_validate(self._spec(names, source, vocab.sha256[:12])),
             digest_prefix=release.sha256[:12],
             s3=s3,
             work_dir=tmp_path / "vocab_work",
@@ -893,9 +881,7 @@ class TestVocabulary:
         result = self._run_it(engine, settings, s3, tmp_path, names, *with_vocabulary)
         with engine.connect() as connection:
             inputs = connection.execute(
-                sa.text(
-                    "select ref_type, ref_id, role from run_input where run_id = :r"
-                ),
+                sa.text("select ref_type, ref_id, role from run_input where run_id = :r"),
                 {"r": result.run_id},
             ).all()
         assert ("release", vocab.release_id, "vocabulary") in inputs

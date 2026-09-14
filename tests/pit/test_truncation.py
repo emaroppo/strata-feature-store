@@ -47,9 +47,7 @@ def truncated_store(engine, settings, s3, cutoff: datetime) -> str:
     # The full vocabulary, not just the features that survived. A store that
     # has not yet received a value for a feature still knows the feature
     # exists, and truncation is about facts rather than about the schema.
-    return panel.build_store(
-        engine, settings, s3, survivors, vocabulary=panel.FEATURES
-    )
+    return panel.build_store(engine, settings, s3, survivors, vocabulary=panel.FEATURES)
 
 
 #: Each publication moment and both sides of it, plus one cutoff before anything
@@ -89,12 +87,8 @@ def test_truncation_holds_with_staleness_bounds(engine, settings, s3, full_store
     truncated = truncated_store(engine, settings, s3, cutoff)
     if not truncated:
         return
-    left = panel.resolve_rows(
-        engine, settings, panel.spec_for(full_store, cutoff, max_age="P18M")
-    )
-    right = panel.resolve_rows(
-        engine, settings, panel.spec_for(truncated, cutoff, max_age="P18M")
-    )
+    left = panel.resolve_rows(engine, settings, panel.spec_for(full_store, cutoff, max_age="P18M"))
+    right = panel.resolve_rows(engine, settings, panel.spec_for(truncated, cutoff, max_age="P18M"))
     assert left == right
 
 
@@ -139,15 +133,12 @@ def test_a_later_cutoff_sees_at_least_as_much(engine, settings, s3, full_store):
             if value is None:
                 continue
             assert later[key] is not None, (
-                f"{key} had a value as of {t1} and none as of {t2}; knowledge does not "
-                "disappear"
+                f"{key} had a value as of {t1} and none as of {t2}; knowledge does not disappear"
             )
 
 
 def test_nothing_is_knowable_before_the_first_publication(engine, settings, s3, full_store):
-    rows = panel.resolve_rows(
-        engine, settings, panel.spec_for(full_store, datetime(2019, 6, 1))
-    )
+    rows = panel.resolve_rows(engine, settings, panel.spec_for(full_store, datetime(2019, 6, 1)))
     assert rows, "the spine should still produce rows"
     assert all(r[3] is None for r in rows), "with nothing resolved in any of them"
 

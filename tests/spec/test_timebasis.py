@@ -50,9 +50,7 @@ def test_table_qualifier_reaches_every_column():
 
 def test_months_and_days_stay_separate_terms():
     """Folding them into one number would drift at month boundaries."""
-    assert interval_sql(parse_duration("P1M15D")) == (
-        "INTERVAL '1 months' + INTERVAL '15 days'"
-    )
+    assert interval_sql(parse_duration("P1M15D")) == ("INTERVAL '1 months' + INTERVAL '15 days'")
 
 
 def test_modeled_lag_without_a_lag_is_refused():
@@ -148,9 +146,7 @@ class TestEveryBasisIsResolvable:
             }
         )
         sql = _melt_query(parsed, "read_csv('x')", ["a"], datetime(2026, 8, 26, 10, 0))
-        line = next(
-            ln.strip() for ln in sql.splitlines() if "AS knowledge_time" in ln
-        )
+        line = next(ln.strip() for ln in sql.splitlines() if "AS knowledge_time" in ln)
         if basis in DERIVED:
             assert line.startswith("NULL::TIMESTAMP"), "the rule supplies it at read"
         else:

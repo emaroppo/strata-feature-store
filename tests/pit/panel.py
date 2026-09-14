@@ -281,6 +281,4 @@ def resolve_rows(engine, settings, spec) -> list[tuple]:
     rows = compose.resolve(plan).fetchall()
     # Drop the spine/cutoff columns, which name the spec rather than the data,
     # and sort so two stores are compared on content alone.
-    return sorted(
-        (r[0], str(r[1]), r[3], r[4], str(r[6]), r[7]) for r in rows
-    )
+    return sorted((r[0], str(r[1]), r[3], r[4], str(r[6]), r[7]) for r in rows)

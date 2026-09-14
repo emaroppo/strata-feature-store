@@ -289,8 +289,7 @@ def _feature_vocabulary(con, relation: str, spec: StandardiseSpec, melted: list[
     names = [
         row[0]
         for row in con.execute(
-            f"SELECT DISTINCT {column} FROM {relation} "
-            f"WHERE {column} IS NOT NULL ORDER BY 1"
+            f"SELECT DISTINCT {column} FROM {relation} WHERE {column} IS NOT NULL ORDER BY 1"
         ).fetchall()
     ]
     if spec.features.name.allow is not None:
@@ -354,9 +353,7 @@ def _register_features(
         # a column per field would be a schema change for every new source.
         meta = to_jsonable(decompose(name, spec.features.meta))
         if vocabulary:
-            meta.update(
-                {k: v for k, v in entry.items() if k in vocabulary.meta}
-            )
+            meta.update({k: v for k, v in entry.items() if k in vocabulary.meta})
         rows.append(
             {
                 "feature_group_id": group_id,
@@ -392,9 +389,7 @@ def _register_features(
             statement.on_conflict_do_update(
                 index_elements=["feature_group_id", "name"],
                 set_={
-                    "unit": sa.func.coalesce(
-                        statement.excluded.unit, feature.c.unit
-                    ),
+                    "unit": sa.func.coalesce(statement.excluded.unit, feature.c.unit),
                     "description": sa.func.coalesce(
                         statement.excluded.description, feature.c.description
                     ),
@@ -421,34 +416,32 @@ def _ensure_group(
     group_name = group_name or spec.feature_group
     with run.transaction() as connection:
         existing = (
-            connection.execute(
-                sa.select(feature_group).where(feature_group.c.name == group_name)
-            )
+            connection.execute(sa.select(feature_group).where(feature_group.c.name == group_name))
             .mappings()
             .first()
         )
         if existing is not None:
             return existing["id"]
         return connection.execute(
-        sa.insert(feature_group)
-        .values(
-            name=group_name,
-            source_id=source["id"],
-            entity_namespace=namespace,
-            time_basis=spec.knowledge_time.basis,
-            declared_lag=spec.knowledge_time.declared_lag,
-            lag_anchor_period=spec.knowledge_time.lag_anchor_period,
-            period_anchor=spec.event_time.anchor,
-            retraction_policy=spec.retraction_policy,
-            storage_prefix=f"{FEATURES_PREFIX}/{group_name}",
-            partition_spec={"by": []},
-            meta={"rationale": spec.knowledge_time.rationale}
-            if spec.knowledge_time.rationale
-            else None,
-            created_by_run_id=run.id,
-        )
-        .returning(feature_group.c.id)
-    ).scalar_one()
+            sa.insert(feature_group)
+            .values(
+                name=group_name,
+                source_id=source["id"],
+                entity_namespace=namespace,
+                time_basis=spec.knowledge_time.basis,
+                declared_lag=spec.knowledge_time.declared_lag,
+                lag_anchor_period=spec.knowledge_time.lag_anchor_period,
+                period_anchor=spec.event_time.anchor,
+                retraction_policy=spec.retraction_policy,
+                storage_prefix=f"{FEATURES_PREFIX}/{group_name}",
+                partition_spec={"by": []},
+                meta={"rationale": spec.knowledge_time.rationale}
+                if spec.knowledge_time.rationale
+                else None,
+                created_by_run_id=run.id,
+            )
+            .returning(feature_group.c.id)
+        ).scalar_one()
 
 
 def _source_relation(source_path: str) -> str:
@@ -568,32 +561,32 @@ def _write_part(
 
     with current.transaction() as connection:
         partition_id = connection.execute(
-        sa.insert(feature_partition)
-        .values(
-            feature_group_id=group_id,
-            object_key=key,
-            content_sha256=digest,
-            size_bytes=size,
-            row_count=rows,
-            # The feature range is what lets a reader skip a whole part without
-            # opening it, which is the point of batching by column.
-            partition_values={
-                "entity_namespace": namespace,
-                "input_hash": input_hash,
-                # Which release these facts came from, so a re-standardise can
-                # find the parts it replaces.
-                "release_sha256": release_sha256,
-                "feature_min": bounds[4],
-                "feature_max": bounds[5],
-            },
-            min_event_time=bounds[0],
-            max_event_time=bounds[1],
-            max_knowledge_time=bounds[2],
-            ingest_time=bounds[3],
-            created_by_run_id=current.id,
-        )
-        .returning(feature_partition.c.id)
-    ).scalar_one()
+            sa.insert(feature_partition)
+            .values(
+                feature_group_id=group_id,
+                object_key=key,
+                content_sha256=digest,
+                size_bytes=size,
+                row_count=rows,
+                # The feature range is what lets a reader skip a whole part without
+                # opening it, which is the point of batching by column.
+                partition_values={
+                    "entity_namespace": namespace,
+                    "input_hash": input_hash,
+                    # Which release these facts came from, so a re-standardise can
+                    # find the parts it replaces.
+                    "release_sha256": release_sha256,
+                    "feature_min": bounds[4],
+                    "feature_max": bounds[5],
+                },
+                min_event_time=bounds[0],
+                max_event_time=bounds[1],
+                max_knowledge_time=bounds[2],
+                ingest_time=bounds[3],
+                created_by_run_id=current.id,
+            )
+            .returning(feature_partition.c.id)
+        ).scalar_one()
     current.wrote("feature_partition", partition_id, role=role)
     current.observed_knowledge_time(bounds[2])
     parquet_path.unlink(missing_ok=True)
@@ -855,9 +848,7 @@ def standardise(
         registered = 0
         if not dry_run:
             for _group_name, group_id in groups.items():
-                registered += _register_features(
-                    current, group_id, vocabulary, spec, described
-                )
+                registered += _register_features(current, group_id, vocabulary, spec, described)
                 current.wrote("feature_group", group_id, role="group")
 
         # A re-standardise of the same release under a changed config describes
@@ -870,8 +861,8 @@ def standardise(
         # whole point of pinning. Done once at the end rather than per part,
         # because a run that died halfway would otherwise leave a group half
         # described by each config, which is worse than either alone.
-        superseded = 0 if dry_run else _supersede_previous(
-            current, list(groups.values()), release["id"]
+        superseded = (
+            0 if dry_run else _supersede_previous(current, list(groups.values()), release["id"])
         )
 
         current.note(

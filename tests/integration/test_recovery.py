@@ -49,9 +49,7 @@ def forget(engine, s3, settings):
 
     def clean(release_id: int, key: str) -> None:
         with engine.begin() as connection:
-            connection.execute(
-                sa.delete(release_table).where(release_table.c.id == release_id)
-            )
+            connection.execute(sa.delete(release_table).where(release_table.c.id == release_id))
         objects.delete(s3, settings.storage.bucket, key)
 
     return clean
@@ -236,14 +234,14 @@ class TestUndo:
         exactly the fiction lineage exists to prevent."""
         panel.build_store(engine, settings, s3, _facts())
         with engine.connect() as connection:
-            run_id = connection.execute(
-                sa.select(sa.func.max(run_table.c.id))
-            ).scalar_one()
+            run_id = connection.execute(sa.select(sa.func.max(run_table.c.id))).scalar_one()
         verify.undo(engine, settings, run_id, s3=s3)
         with engine.connect() as connection:
-            row = connection.execute(
-                sa.select(run_table).where(run_table.c.id == run_id)
-            ).mappings().one()
+            row = (
+                connection.execute(sa.select(run_table).where(run_table.c.id == run_id))
+                .mappings()
+                .one()
+            )
         assert row["name"].startswith("pit fixture")
 
     def test_it_refuses_when_something_read_the_outputs(self, engine, settings, s3):
@@ -282,8 +280,7 @@ class TestUndo:
         frozen = compose.freeze(engine, settings, spec, s3=s3)
         with engine.connect() as connection:
             run_id = connection.execute(
-                sa.select(run_table.c.id)
-                .where(run_table.c.name.like(f"freeze {spec.name}%"))
+                sa.select(run_table.c.id).where(run_table.c.name.like(f"freeze {spec.name}%"))
             ).scalar_one()
         with pytest.raises(verify.UndoError, match=r"[Ff]rozen"):
             verify.undo(engine, settings, run_id, s3=s3)
@@ -315,9 +312,13 @@ class TestPrune:
 
         assert not objects.exists(s3, settings.storage.bucket, a_release.object_key)
         with engine.connect() as connection:
-            row = connection.execute(
-                sa.select(release_table).where(release_table.c.id == a_release.release_id)
-            ).mappings().one()
+            row = (
+                connection.execute(
+                    sa.select(release_table).where(release_table.c.id == a_release.release_id)
+                )
+                .mappings()
+                .one()
+            )
         assert row["pruned_at"] is not None
         assert row["sha256"] == a_release.sha256
 
@@ -379,10 +380,7 @@ class TestPruneOrphans:
     """Deleting debris, and refusing to when the picture is not trustworthy."""
 
     def _plant(self, s3, settings, suffix: str = "") -> str:
-        key = (
-            f"features/orphan_{uuid.uuid4().hex[:8]}{suffix}/"
-            f"entity_namespace=x/part-dead.parquet"
-        )
+        key = f"features/orphan_{uuid.uuid4().hex[:8]}{suffix}/entity_namespace=x/part-dead.parquet"
         objects.put_bytes(s3, settings.storage.bucket, key, b"debris")
         return key
 
@@ -433,9 +431,7 @@ class TestPruneOrphans:
         result = verify.prune_orphans(engine, settings, s3=s3)
         assert key in result["removed"]
 
-    def test_it_refuses_when_the_catalog_disagrees(
-        self, engine, settings, s3, a_release, forget
-    ):
+    def test_it_refuses_when_the_catalog_disagrees(self, engine, settings, s3, a_release, forget):
         """An orphan list computed against a broken store is not one to act on."""
         self._plant(s3, settings)
         objects.delete(s3, settings.storage.bucket, a_release.object_key)
@@ -538,7 +534,9 @@ class TestEveryCatalogueTableIsCovered:
                     sa.select(dataset_version.c.object_prefix).where(
                         dataset_version.c.object_prefix.isnot(None)
                     )
-                ).scalars().all()
+                )
+                .scalars()
+                .all()
             )
         assert catalogued, "nothing to check; the fixture should have frozen something"
         preview = verify.prune_orphans(engine, settings, s3=s3, dry_run=True)

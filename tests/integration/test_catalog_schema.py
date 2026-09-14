@@ -92,9 +92,7 @@ class TestVocabularies:
     def test_time_basis_must_be_known(self, connection, a_source, a_run):
         with pytest.raises(sa.exc.IntegrityError, match="ck_feature_group_time_basis"):
             connection.execute(
-                sa.insert(feature_group).values(
-                    _group_values(a_source, a_run, time_basis="vibes")
-                )
+                sa.insert(feature_group).values(_group_values(a_source, a_run, time_basis="vibes"))
             )
 
     def test_retraction_policy_must_be_known(self, connection, a_source, a_run):

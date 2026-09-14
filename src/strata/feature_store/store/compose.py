@@ -96,9 +96,13 @@ def plan(connection: sa.Connection, spec: ComposeSpec, settings: Settings) -> Pl
             .first()
         )
         if row is None:
-            available = connection.execute(
-                sa.select(feature_group_table.c.name).order_by(feature_group_table.c.name)
-            ).scalars().all()
+            available = (
+                connection.execute(
+                    sa.select(feature_group_table.c.name).order_by(feature_group_table.c.name)
+                )
+                .scalars()
+                .all()
+            )
             raise ComposeError(f"no feature group named {name!r}. Available: {available}")
 
         # Invariant 2 at read: every group in one composition must speak one
@@ -124,9 +128,7 @@ def plan(connection: sa.Connection, spec: ComposeSpec, settings: Settings) -> Pl
             id=row["id"],
             name=name,
             entity_namespace=row["entity_namespace"],
-            urls=[
-                duck.s3_url(settings.storage.bucket, p["object_key"]) for p in partitions
-            ],
+            urls=[duck.s3_url(settings.storage.bucket, p["object_key"]) for p in partitions],
             knowledge_time=knowledge_time_sql(
                 row["time_basis"],
                 lag,
@@ -171,14 +173,18 @@ def _resolve_dtypes(
             )
         ).scalar_one_or_none()
         if dtype is None:
-            near = connection.execute(
-                sa.select(feature_table.c.name)
-                .where(
-                    feature_table.c.feature_group_id == groups[ref.group].id,
-                    feature_table.c.name.like(f"{ref.name[:6]}%"),
+            near = (
+                connection.execute(
+                    sa.select(feature_table.c.name)
+                    .where(
+                        feature_table.c.feature_group_id == groups[ref.group].id,
+                        feature_table.c.name.like(f"{ref.name[:6]}%"),
+                    )
+                    .limit(5)
                 )
-                .limit(5)
-            ).scalars().all()
+                .scalars()
+                .all()
+            )
             raise ComposeError(
                 f"group {ref.group!r} has no feature named {ref.name!r}."
                 + (f" Did you mean one of {near}?" if near else "")
@@ -197,25 +203,25 @@ def _resolve_entities(
     if source.ids is not None:
         return sorted(set(source.ids))
     if source.name is not None:
-        version = (
-            connection.execute(
-                sa.select(entity_list_version.c.id)
-                .join(entity_list, entity_list.c.id == entity_list_version.c.entity_list_id)
-                .where(
-                    entity_list.c.name == source.name,
-                    entity_list_version.c.version_num == source.version,
-                )
-            ).scalar_one_or_none()
-        )
+        version = connection.execute(
+            sa.select(entity_list_version.c.id)
+            .join(entity_list, entity_list.c.id == entity_list_version.c.entity_list_id)
+            .where(
+                entity_list.c.name == source.name,
+                entity_list_version.c.version_num == source.version,
+            )
+        ).scalar_one_or_none()
         if version is None:
-            raise ComposeError(
-                f"no entity list {source.name!r} at version {source.version}"
+            raise ComposeError(f"no entity list {source.name!r} at version {source.version}")
+        members = (
+            connection.execute(
+                sa.select(entity_list_member.c.entity_id).where(
+                    entity_list_member.c.entity_list_version_id == version
+                )
             )
-        members = connection.execute(
-            sa.select(entity_list_member.c.entity_id).where(
-                entity_list_member.c.entity_list_version_id == version
-            )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         if not members:
             raise ComposeError(f"entity list {source.name!r} v{source.version} is empty")
         return sorted(members)
@@ -326,9 +332,7 @@ def build_sql(plan: Plan) -> str:
     fact_unions = []
     for name, group in plan.groups.items():
         urls = ", ".join(_quote_literal(u) for u in group.urls)
-        wanted = ", ".join(
-            _quote_literal(r.name) for r in spec.features if r.group == name
-        )
+        wanted = ", ".join(_quote_literal(r.name) for r in spec.features if r.group == name)
         fact_unions.append(
             f"""
         SELECT
@@ -760,12 +764,16 @@ def load_version(connection: sa.Connection, name: str, version: int | None = Non
         query = query.where(dataset_version.c.version_num == version)
     row = connection.execute(query).mappings().first()
     if row is None:
-        available = connection.execute(
-            sa.select(dataset_version.c.version_num)
-            .join(dataset, dataset.c.id == dataset_version.c.dataset_id)
-            .where(dataset.c.name == name)
-            .order_by(dataset_version.c.version_num)
-        ).scalars().all()
+        available = (
+            connection.execute(
+                sa.select(dataset_version.c.version_num)
+                .join(dataset, dataset.c.id == dataset_version.c.dataset_id)
+                .where(dataset.c.name == name)
+                .order_by(dataset_version.c.version_num)
+            )
+            .scalars()
+            .all()
+        )
         raise ComposeError(
             f"no dataset {name!r}"
             + (f" at version {version}. Available: {available}" if available else "")

@@ -56,9 +56,7 @@ class Findings:
 
     @property
     def ok(self) -> bool:
-        return not (
-            self.missing or self.wrong_size or self.wrong_digest or self.registry_drift
-        )
+        return not (self.missing or self.wrong_size or self.wrong_digest or self.registry_drift)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -97,14 +95,16 @@ def _catalogued(connection: sa.Connection, run_id: int | None) -> list[dict[str,
         run_table.c.status.label("status"),
         sa.literal("feature_partition").label("kind"),
     ).join(run_table, run_table.c.id == feature_partition.c.created_by_run_id)
-    releases = sa.select(
-        release.c.object_key.label("key"),
-        release.c.size_bytes.label("size"),
-        release.c.sha256.label("digest"),
-        run_table.c.status.label("status"),
-        sa.literal("release").label("kind"),
-    ).join(run_table, run_table.c.id == release.c.created_by_run_id).where(
-        release.c.pruned_at.is_(None)
+    releases = (
+        sa.select(
+            release.c.object_key.label("key"),
+            release.c.size_bytes.label("size"),
+            release.c.sha256.label("digest"),
+            run_table.c.status.label("status"),
+            sa.literal("release").label("kind"),
+        )
+        .join(run_table, run_table.c.id == release.c.created_by_run_id)
+        .where(release.c.pruned_at.is_(None))
     )
     # Crosswalk and composed parquet, addressed by dataset_version rather than
     # by a partition or a release.
@@ -125,9 +125,7 @@ def _catalogued(connection: sa.Connection, run_id: int | None) -> list[dict[str,
         versions = versions.where(dataset_version.c.created_by_run_id == run_id)
     return [
         dict(r)
-        for r in connection.execute(
-            sa.union_all(partitions, releases, versions)
-        ).mappings().all()
+        for r in connection.execute(sa.union_all(partitions, releases, versions)).mappings().all()
     ]
 
 
@@ -205,9 +203,13 @@ def _registry_drift(engine: sa.Engine, settings: Settings, *, run_id: int | None
 
     drift: list[str] = []
     with engine.connect() as connection:
-        groups = connection.execute(
-            sa.select(feature_group.c.id, feature_group.c.name).order_by(feature_group.c.id)
-        ).mappings().all()
+        groups = (
+            connection.execute(
+                sa.select(feature_group.c.id, feature_group.c.name).order_by(feature_group.c.id)
+            )
+            .mappings()
+            .all()
+        )
         for group in groups:
             partitions = catalog.live_partitions(connection, group["id"])
             if not partitions:
@@ -218,7 +220,9 @@ def _registry_drift(engine: sa.Engine, settings: Settings, *, run_id: int | None
                         feature.c.feature_group_id == group["id"],
                         feature.c.deprecated_at.is_(None),
                     )
-                ).scalars().all()
+                )
+                .scalars()
+                .all()
             )
             con = duck.connect(settings.storage)
             urls = ", ".join(
@@ -261,9 +265,11 @@ def undo(engine: sa.Engine, settings: Settings, run_id: int, *, s3=None) -> dict
     bucket = settings.storage.bucket
 
     with engine.connect() as connection:
-        run_row = connection.execute(
-            sa.select(run_table).where(run_table.c.id == run_id)
-        ).mappings().first()
+        run_row = (
+            connection.execute(sa.select(run_table).where(run_table.c.id == run_id))
+            .mappings()
+            .first()
+        )
         if run_row is None:
             raise UndoError(f"no run {run_id}")
         if run_row["status"] == "rolled_back":
@@ -277,16 +283,20 @@ def undo(engine: sa.Engine, settings: Settings, run_id: int, *, s3=None) -> dict
         if not outputs:
             raise UndoError(f"run {run_id} produced nothing to undo")
 
-        dependants = connection.execute(
-            sa.select(run_input.c.run_id)
-            .where(
-                sa.tuple_(run_input.c.ref_type, run_input.c.ref_id).in_(
-                    [(t, i) for t, i in outputs]
-                ),
-                run_input.c.run_id != run_id,
+        dependants = (
+            connection.execute(
+                sa.select(run_input.c.run_id)
+                .where(
+                    sa.tuple_(run_input.c.ref_type, run_input.c.ref_id).in_(
+                        [(t, i) for t, i in outputs]
+                    ),
+                    run_input.c.run_id != run_id,
+                )
+                .distinct()
             )
-            .distinct()
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         if dependants:
             raise UndoError(
                 f"run {run_id}'s outputs were read by run(s) {sorted(dependants)}. "
@@ -295,11 +305,15 @@ def undo(engine: sa.Engine, settings: Settings, run_id: int, *, s3=None) -> dict
             )
 
         version_ids = [i for t, i in outputs if t == "dataset_version"]
-        pinned = connection.execute(
-            sa.select(dataset_version.c.id).where(
-                dataset_version.c.id.in_(version_ids) if version_ids else sa.false()
+        pinned = (
+            connection.execute(
+                sa.select(dataset_version.c.id).where(
+                    dataset_version.c.id.in_(version_ids) if version_ids else sa.false()
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         if pinned:
             raise UndoError(
                 f"run {run_id} froze dataset version(s) {sorted(pinned)}. Frozen versions "
@@ -313,14 +327,16 @@ def undo(engine: sa.Engine, settings: Settings, run_id: int, *, s3=None) -> dict
                 sa.select(feature_partition.c.object_key).where(
                     feature_partition.c.id.in_(partition_ids)
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
             if partition_ids
             else []
         )
         keys += (
-            connection.execute(
-                sa.select(release.c.object_key).where(release.c.id.in_(release_ids))
-            ).scalars().all()
+            connection.execute(sa.select(release.c.object_key).where(release.c.id.in_(release_ids)))
+            .scalars()
+            .all()
             if release_ids
             else []
         )
@@ -336,9 +352,7 @@ def undo(engine: sa.Engine, settings: Settings, run_id: int, *, s3=None) -> dict
             )
         if release_ids:
             connection.execute(sa.delete(release).where(release.c.id.in_(release_ids)))
-        connection.execute(
-            sa.delete(run_output).where(run_output.c.run_id == run_id)
-        )
+        connection.execute(sa.delete(run_output).where(run_output.c.run_id == run_id))
         connection.execute(
             sa.update(run_table).where(run_table.c.id == run_id).values(status="rolled_back")
         )
@@ -373,9 +387,7 @@ def prune_release(engine: sa.Engine, settings: Settings, digest_prefix: str, *, 
 
     with engine.begin() as connection:
         connection.execute(
-            sa.update(release)
-            .where(release.c.id == found["id"])
-            .values(pruned_at=sa.func.now())
+            sa.update(release).where(release.c.id == found["id"]).values(pruned_at=sa.func.now())
         )
     objects.delete(s3, settings.storage.bucket, found["object_key"])
     return {"sha256": found["sha256"], "object_key": found["object_key"]}
@@ -414,11 +426,15 @@ def prune_orphans(
     s3 = s3 or objects.client(settings.storage)
 
     with engine.connect() as connection:
-        in_flight = connection.execute(
-            sa.select(run_table.c.id, run_table.c.kind, run_table.c.name)
-            .where(run_table.c.status == "running")
-            .order_by(run_table.c.id)
-        ).mappings().all()
+        in_flight = (
+            connection.execute(
+                sa.select(run_table.c.id, run_table.c.kind, run_table.c.name)
+                .where(run_table.c.status == "running")
+                .order_by(run_table.c.id)
+            )
+            .mappings()
+            .all()
+        )
     if in_flight:
         raise UndoError(
             f"{len(in_flight)} run(s) still in progress "

@@ -92,9 +92,7 @@ class EventTimeSpec(Strict):
     @model_validator(mode="after")
     def _known_period_and_anchor(self):
         if self.from_column_name and self.column:
-            raise ValueError(
-                "event_time comes from the column names or from a column, not both"
-            )
+            raise ValueError("event_time comes from the column names or from a column, not both")
         if not self.from_column_name and not self.column:
             raise ValueError("event_time needs a column, or from_column_name")
         if self.from_column_name and self.period == "irregular":
@@ -286,9 +284,7 @@ class StandardiseSpec(Strict):
     #: Named for what is in the columns rather than for a shape, because both
     #: melted layouts are "wide" in some direction and the word does not say
     #: which.
-    layout: Literal["features_in_columns", "periods_in_columns", "long"] = (
-        "features_in_columns"
-    )
+    layout: Literal["features_in_columns", "periods_in_columns", "long"] = "features_in_columns"
     entity: EntitySpec
     event_time: EventTimeSpec
     knowledge_time: KnowledgeTimeSpec
@@ -325,9 +321,7 @@ class StandardiseSpec(Strict):
                     "features.name.source must be 'column_name'"
                 )
             if self.event_time.from_column_name:
-                raise ValueError(
-                    "the column headers cannot be both feature names and periods"
-                )
+                raise ValueError("the column headers cannot be both feature names and periods")
             if not self.event_time.column:
                 raise ValueError("features_in_columns needs event_time.column")
         else:  # periods_in_columns

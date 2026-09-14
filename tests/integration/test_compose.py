@@ -87,11 +87,13 @@ def _write_facts(engine, settings, s3, rows, *, group_name, namespace=NAMESPACE)
                 ).scalar_one()
             existing_features = set(
                 connection.execute(
-                    sa.select(sa.text("name")).select_from(sa.text("feature")).where(
-                        sa.text("feature_group_id = :g")
-                    ),
+                    sa.select(sa.text("name"))
+                    .select_from(sa.text("feature"))
+                    .where(sa.text("feature_group_id = :g")),
                     {"g": group_id},
-                ).scalars().all()
+                )
+                .scalars()
+                .all()
             )
             partition_id = connection.execute(
                 sa.insert(feature_partition)
@@ -200,22 +202,26 @@ class TestPointInTime:
         self, engine, settings, s3, revised
     ):
         """Absence of knowledge is not zero, and it is not the first estimate."""
-        spec = _spec(revised, spine={
-            "entities": {"ids": ["AAA"]},
-            "times": {"dates": ["2020-12-31"]},
-        })
+        spec = _spec(
+            revised,
+            spine={
+                "entities": {"ids": ["AAA"]},
+                "times": {"dates": ["2020-12-31"]},
+            },
+        )
         rows = _resolve(engine, settings, spec)
         assert len(rows) == 1
         assert rows[0][4] is None
 
-    def test_the_boundary_is_inclusive_on_the_publication_date(
-        self, engine, settings, s3, revised
-    ):
+    def test_the_boundary_is_inclusive_on_the_publication_date(self, engine, settings, s3, revised):
         """Knowable *at* the cutoff counts as knowable."""
-        spec = _spec(revised, spine={
-            "entities": {"ids": ["AAA"]},
-            "times": {"dates": ["2021-03-01"]},
-        })
+        spec = _spec(
+            revised,
+            spine={
+                "entities": {"ids": ["AAA"]},
+                "times": {"dates": ["2021-03-01"]},
+            },
+        )
         assert _resolve(engine, settings, spec)[0][4] == 1.0
 
     def test_a_fixed_cutoff_reproduces_one_moment(self, engine, settings, s3, revised):
@@ -314,14 +320,13 @@ class TestFreezing:
         base = _spec(revised).canonical()
         base["name"] = f"eq_{uuid.uuid4().hex[:8]}"
         as_query = ComposeSpec.model_validate({**base, "freeze": {"mode": "query"}})
-        as_materialized = ComposeSpec.model_validate(
-            {**base, "freeze": {"mode": "materialized"}}
-        )
+        as_materialized = ComposeSpec.model_validate({**base, "freeze": {"mode": "materialized"}})
         compose.freeze(engine, settings, as_query, s3=s3)
         compose.freeze(engine, settings, as_materialized, s3=s3)
 
         left, _ = compose.read(engine, settings, base["name"], 1)
         right, _ = compose.read(engine, settings, base["name"], 2)
+
         def key(rows):
             return sorted((r[0], str(r[1]), r[3], r[4]) for r in rows)
 
@@ -336,18 +341,20 @@ class TestFreezing:
             row = compose.load_version(connection, spec.name, frozen.version_num)
         assert row["ingest_watermark"] == frozen.watermark
 
-    def test_a_later_arrival_does_not_change_a_pinned_answer(
-        self, engine, settings, s3, revised
-    ):
+    def test_a_later_arrival_does_not_change_a_pinned_answer(self, engine, settings, s3, revised):
         """The reason the watermark exists.
 
         A fact ingested after the freeze, but knowable before the cutoff, would
         otherwise change what a pinned version resolves to — silently, and
         without its hash changing.
         """
-        spec = _spec(revised, spine={
-            "entities": {"ids": ["AAA"]}, "times": {"dates": ["2022-06-01"]},
-        })
+        spec = _spec(
+            revised,
+            spine={
+                "entities": {"ids": ["AAA"]},
+                "times": {"dates": ["2022-06-01"]},
+            },
+        )
         frozen = compose.freeze(engine, settings, spec, s3=s3)
         before, _ = compose.read(engine, settings, spec.name, frozen.version_num)
         original = before.fetchall()[0][4]
@@ -357,8 +364,17 @@ class TestFreezing:
             engine,
             settings,
             s3,
-            [("AAA", date(2020, 12, 31), datetime(2022, 4, 1), datetime(2026, 6, 1),
-              "gdp", 99.0, None)],
+            [
+                (
+                    "AAA",
+                    date(2020, 12, 31),
+                    datetime(2022, 4, 1),
+                    datetime(2026, 6, 1),
+                    "gdp",
+                    99.0,
+                    None,
+                )
+            ],
             group_name=revised,
         )
 
@@ -366,9 +382,7 @@ class TestFreezing:
         assert after.fetchall()[0][4] == original, "a pinned version must not move"
         assert warning["facts"] == 1, "and must say what it is withholding"
 
-        latest, _ = compose.read(
-            engine, settings, spec.name, frozen.version_num, latest=True
-        )
+        latest, _ = compose.read(engine, settings, spec.name, frozen.version_num, latest=True)
         assert latest.fetchall()[0][4] == 99.0, "--latest sees what we know now"
 
 
@@ -384,8 +398,17 @@ class TestRefusals:
             engine,
             settings,
             s3,
-            [("ZZZ", date(2020, 12, 31), datetime(2021, 3, 1), datetime(2026, 1, 1),
-              "gdp", 1.0, None)],
+            [
+                (
+                    "ZZZ",
+                    date(2020, 12, 31),
+                    datetime(2021, 3, 1),
+                    datetime(2026, 1, 1),
+                    "gdp",
+                    1.0,
+                    None,
+                )
+            ],
             group_name=name,
             namespace="some-native-vocab",
         )
