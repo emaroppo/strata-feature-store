@@ -39,9 +39,12 @@ def _settings(config_path: Path | None = None):
 
 
 def _engine(settings):
-    import sqlalchemy as sa
+    # The way every strata database is opened. On Postgres it is
+    # create_engine and nothing more; the one place to change if a
+    # connection setting ever matters.
+    from strata.common import database
 
-    return sa.create_engine(settings.catalog.with_password())
+    return database.engine(settings.catalog.with_password())
 
 
 def _fail(message: str) -> None:
