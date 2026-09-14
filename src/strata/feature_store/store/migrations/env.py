@@ -14,8 +14,8 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from feature_store.store import config as store_config
-from feature_store.store.tables import metadata
+from strata.feature_store.store import config as store_config
+from strata.feature_store.store.tables import metadata
 
 alembic_config = context.config
 

@@ -23,9 +23,9 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from feature_store.store import catalog, objects
-from feature_store.store.config import Settings
-from feature_store.store.runs import run as open_run
+from strata.feature_store.store import catalog, objects
+from strata.feature_store.store.config import Settings
+from strata.feature_store.store.runs import run as open_run
 
 
 @dataclass(frozen=True, slots=True)

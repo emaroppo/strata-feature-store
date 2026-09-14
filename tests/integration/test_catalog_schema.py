@@ -13,7 +13,7 @@ from datetime import date, datetime
 import pytest
 import sqlalchemy as sa
 
-from feature_store.store.tables import (
+from strata.feature_store.store.tables import (
     dataset,
     dataset_version,
     entity_namespace,

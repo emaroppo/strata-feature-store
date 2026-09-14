@@ -33,7 +33,7 @@ err = Console(stderr=True)
 
 
 def _settings(config_path: Path | None = None):
-    from feature_store.store import config as store_config
+    from strata.feature_store.store import config as store_config
 
     return store_config.load(config_path)
 
@@ -88,8 +88,8 @@ def namespace_add(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Register an entity vocabulary."""
-    from feature_store.store import catalog
-    from feature_store.store.runs import run as open_run
+    from strata.feature_store.store import catalog
+    from strata.feature_store.store.runs import run as open_run
 
     settings = _settings(config)
     with open_run(_engine(settings), "ingest_release", f"namespace {name}", {"name": name}) as run:
@@ -109,7 +109,7 @@ def source_register(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Register a publisher's product. Releases arrive against it."""
-    from feature_store.store import catalog, ingest
+    from strata.feature_store.store import catalog, ingest
 
     settings = _settings(config)
     try:
@@ -132,7 +132,7 @@ def source_register(
 @source_app.command("ls")
 def source_ls(config: Path | None = typer.Option(None)) -> None:
     """List registered sources."""
-    from feature_store.store import catalog
+    from strata.feature_store.store import catalog
 
     settings = _settings(config)
     with _engine(settings).begin() as connection:
@@ -166,7 +166,7 @@ def release_add(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Store a downloaded file exactly as it arrived, and record it."""
-    from feature_store.store import catalog, ingest
+    from strata.feature_store.store import catalog, ingest
 
     settings = _settings(config)
     try:
@@ -204,7 +204,7 @@ def release_ls(
     config: Path | None = typer.Option(None),
 ) -> None:
     """List stored releases."""
-    from feature_store.store import catalog
+    from strata.feature_store.store import catalog
 
     settings = _settings(config)
     with _engine(settings).begin() as connection:
@@ -238,7 +238,7 @@ def release_get(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Pull an original file back out, digest-verified on arrival."""
-    from feature_store.store import catalog, ingest
+    from strata.feature_store.store import catalog, ingest
 
     settings = _settings(config)
     try:
@@ -260,7 +260,7 @@ def crosswalk_register(
 
     The one-to-one check runs here, so a version that exists is safe to use.
     """
-    from feature_store.store import crosswalk as cw
+    from strata.feature_store.store import crosswalk as cw
 
     settings = _settings(config)
     try:
@@ -293,7 +293,7 @@ def standardise_cmd(
     """Turn one release into long-format facts."""
     import json
 
-    from feature_store.store import standardise as std
+    from strata.feature_store.store import standardise as std
 
     overrides: dict[str, object] = {}
     for item in set_:
@@ -404,8 +404,8 @@ def compose_cmd(
     """Resolve a composition, and pin it so it answers the same way forever."""
     import json
 
-    from feature_store.spec.compose import ComposeSpec
-    from feature_store.store import compose as cmp
+    from strata.feature_store.spec.compose import ComposeSpec
+    from strata.feature_store.store import compose as cmp
 
     settings = _settings(config)
     payload = json.loads(spec_file.read_text())
@@ -455,7 +455,7 @@ def read_cmd(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Resolve a frozen version, warning about anything its pin withholds."""
-    from feature_store.store import compose as cmp
+    from strata.feature_store.store import compose as cmp
 
     settings = _settings(config)
     name, _, version = target.partition("@")
@@ -498,7 +498,7 @@ def versions_cmd(
     """Every frozen version of a dataset."""
     import sqlalchemy as sa
 
-    from feature_store.store.tables import dataset, dataset_version
+    from strata.feature_store.store.tables import dataset, dataset_version
 
     settings = _settings(config)
     with _engine(settings).connect() as connection:
@@ -540,7 +540,7 @@ def verify_cmd(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Check that the catalog and the store agree."""
-    from feature_store.store import verify as verifier
+    from strata.feature_store.store import verify as verifier
 
     settings = _settings(config)
 
@@ -599,7 +599,7 @@ def runs_undo(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Roll a run's outputs back. Refuses if anything depends on them."""
-    from feature_store.store import verify as verifier
+    from strata.feature_store.store import verify as verifier
 
     settings = _settings(config)
     try:
@@ -623,7 +623,7 @@ def release_prune(
     Never automatic. Re-standardising from the original file is the whole reason
     releases are kept, and this is the one command that gives that up.
     """
-    from feature_store.store import verify as verifier
+    from strata.feature_store.store import verify as verifier
 
     settings = _settings(config)
     if not yes:
@@ -650,8 +650,8 @@ def entity_list_cmd(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Freeze a named set of entity ids as a new version."""
-    from feature_store.store import catalog
-    from feature_store.store.runs import run as open_run
+    from strata.feature_store.store import catalog
+    from strata.feature_store.store.runs import run as open_run
 
     settings = _settings(config)
     members = list(ids)
@@ -687,7 +687,7 @@ def runs_ls(
     """Recent runs."""
     import sqlalchemy as sa
 
-    from feature_store.store.tables import run as run_table
+    from strata.feature_store.store.tables import run as run_table
 
     settings = _settings(config)
     query = sa.select(run_table).order_by(run_table.c.started_at.desc()).limit(limit)
@@ -715,7 +715,7 @@ def runs_ls(
 def _describe(ref_type: str, ref_id: int, connection) -> str:
     import sqlalchemy as sa
 
-    from feature_store.store.tables import release as release_table
+    from strata.feature_store.store.tables import release as release_table
 
     if ref_type == "release":
         row = (
@@ -737,8 +737,8 @@ def runs_show(
     """One run: what it was, what it read, what it produced."""
     import sqlalchemy as sa
 
-    from feature_store.store.tables import run as run_table
-    from feature_store.store.tables import run_input, run_output
+    from strata.feature_store.store.tables import run as run_table
+    from strata.feature_store.store.tables import run_input, run_output
 
     settings = _settings(config)
     with _engine(settings).begin() as connection:
@@ -781,8 +781,8 @@ def _walk_lineage(connection, run_id: int, seen: set[int], depth: int) -> None:
     """Print what produced this run's inputs, and what produced those, and so on."""
     import sqlalchemy as sa
 
-    from feature_store.store.tables import run as run_table
-    from feature_store.store.tables import run_input, run_output
+    from strata.feature_store.store.tables import run as run_table
+    from strata.feature_store.store.tables import run_input, run_output
 
     if run_id in seen or depth > 12:
         return

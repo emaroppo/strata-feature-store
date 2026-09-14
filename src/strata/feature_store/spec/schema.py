@@ -12,7 +12,7 @@ count is not. Wide exists here only as an output orientation, produced by
 pivoting at freeze time, and is never a registered storage layout.
 
 The dtypes are named rather than constructed, so this module stays free of
-``pyarrow``. ``feature_store.store.parquet`` turns them into a real schema.
+``pyarrow``. ``strata.feature_store.store.parquet`` turns them into a real schema.
 """
 
 from typing import Final
@@ -39,7 +39,7 @@ COLUMNS: Final[tuple[str, ...]] = (
 
 #: Logical types, resolved to physical ones by the store. ``knowledge_time`` is
 #: nullable because a ``modeled_lag`` group leaves it null on first load and
-#: derives it at read; see :mod:`feature_store.spec.timebasis`.
+#: derives it at read; see :mod:`strata.feature_store.spec.timebasis`.
 DTYPES: Final[dict[str, str]] = {
     ENTITY_ID: "string",
     EVENT_TIME: "date32",
@@ -74,7 +74,7 @@ SCHEMA_VERSION: Final = 1
 
 #: Parquet key-value metadata keys. Prefixed so they cannot collide with a
 #: writer's own.
-META_PREFIX: Final = "feature_store."
+META_PREFIX: Final = "strata.feature_store."
 
 
 def value_column(dtype: str) -> str:

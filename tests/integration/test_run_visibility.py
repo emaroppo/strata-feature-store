@@ -19,11 +19,11 @@ from datetime import datetime
 import pytest
 import sqlalchemy as sa
 
-from feature_store.store import catalog
-from feature_store.store.runs import LineageError
-from feature_store.store.runs import run as open_run
-from feature_store.store.tables import feature_group, feature_partition
-from feature_store.store.tables import run as run_table
+from strata.feature_store.store import catalog
+from strata.feature_store.store.runs import LineageError
+from strata.feature_store.store.runs import run as open_run
+from strata.feature_store.store.tables import feature_group, feature_partition
+from strata.feature_store.store.tables import run as run_table
 
 pytestmark = pytest.mark.integration
 

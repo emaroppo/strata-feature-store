@@ -22,17 +22,17 @@ from pathlib import Path
 
 import pytest
 
-import feature_store.spec
+import strata.feature_store.spec
 
 #: Anything that opens a socket, a file handle it did not create, or a database.
 FORBIDDEN = ("sqlalchemy", "alembic", "psycopg", "boto3", "botocore", "duckdb", "pyarrow", "polars")
 
-SPEC_DIR = Path(feature_store.spec.__file__).parent
+SPEC_DIR = Path(strata.feature_store.spec.__file__).parent
 
 
 def spec_modules() -> list[str]:
     return [
-        f"feature_store.spec.{m.name}"
+        f"strata.feature_store.spec.{m.name}"
         for m in pkgutil.iter_modules([str(SPEC_DIR)])
         if not m.ispkg
     ]
@@ -55,7 +55,7 @@ def test_no_forbidden_import_in_source(path: Path):
     offending = [
         name
         for name in found
-        if name.split(".")[0] in FORBIDDEN or name.startswith("feature_store.store")
+        if name.split(".")[0] in FORBIDDEN or name.startswith("strata.feature_store.store")
     ]
     assert not offending, f"{path.name} imports {offending}, which the spec boundary forbids"
 
@@ -68,11 +68,11 @@ def test_no_forbidden_import_at_runtime():
         f"for name in {modules!r}:\n"
         "    __import__(name)\n"
         f"leaked = sorted(n for n in sys.modules if n.split('.')[0] in {FORBIDDEN!r})\n"
-        "leaked += sorted(n for n in sys.modules if n.startswith('feature_store.store'))\n"
+        "leaked += sorted(n for n in sys.modules if n.startswith('strata.feature_store.store'))\n"
         "print(','.join(leaked))\n"
     )
     result = subprocess.run(
         [sys.executable, "-c", program], capture_output=True, text=True, check=True
     )
     leaked = [n for n in result.stdout.strip().split(",") if n]
-    assert not leaked, f"importing feature_store.spec pulled in {leaked}"
+    assert not leaked, f"importing strata.feature_store.spec pulled in {leaked}"

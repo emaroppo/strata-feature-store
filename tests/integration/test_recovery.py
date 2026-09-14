@@ -18,11 +18,11 @@ from datetime import date, datetime
 import pytest
 import sqlalchemy as sa
 
-from feature_store.store import catalog, compose, ingest, objects, verify
-from feature_store.store.runs import run as open_run
-from feature_store.store.tables import feature_partition
-from feature_store.store.tables import release as release_table
-from feature_store.store.tables import run as run_table
+from strata.feature_store.store import catalog, compose, ingest, objects, verify
+from strata.feature_store.store.runs import run as open_run
+from strata.feature_store.store.tables import feature_partition
+from strata.feature_store.store.tables import release as release_table
+from strata.feature_store.store.tables import run as run_table
 
 from ..pit import panel
 
@@ -139,8 +139,8 @@ class TestVerify:
         Nothing can discover the feature, and a spec naming it is refused even
         though the facts are sitting there.
         """
-        from feature_store.store.tables import feature as feature_table
-        from feature_store.store.tables import feature_group
+        from strata.feature_store.store.tables import feature as feature_table
+        from strata.feature_store.store.tables import feature_group
 
         name = panel.build_store(engine, settings, s3, _facts("orphaned_feature"))
         with engine.begin() as connection:
@@ -180,8 +180,8 @@ class TestVerify:
         behaviour as a fault, on a scale that buries the real findings — which
         is exactly what it did the first time verify ran against the real store.
         """
-        from feature_store.store.tables import feature as feature_table
-        from feature_store.store.tables import feature_group
+        from strata.feature_store.store.tables import feature as feature_table
+        from strata.feature_store.store.tables import feature_group
 
         name = panel.build_store(engine, settings, s3, _facts())
         with engine.begin() as connection:
@@ -212,7 +212,7 @@ class TestUndo:
     def test_it_removes_the_partition_and_its_object(self, engine, settings, s3):
         name = panel.build_store(engine, settings, s3, _facts())
         with engine.connect() as connection:
-            from feature_store.store.tables import feature_group
+            from strata.feature_store.store.tables import feature_group
 
             group_id = connection.execute(
                 sa.select(feature_group.c.id).where(feature_group.c.name == name)
@@ -250,7 +250,7 @@ class TestUndo:
         """A dangling lineage edge is worse than an undeleted partition."""
         name = panel.build_store(engine, settings, s3, _facts())
         with engine.connect() as connection:
-            from feature_store.store.tables import feature_group
+            from strata.feature_store.store.tables import feature_group
 
             group_id = connection.execute(
                 sa.select(feature_group.c.id).where(feature_group.c.name == name)
@@ -265,7 +265,7 @@ class TestUndo:
 
     def test_it_refuses_to_unmake_a_frozen_version(self, engine, settings, s3):
         """Undoing this would leave every pin to it unresolvable."""
-        from feature_store.spec.compose import ComposeSpec
+        from strata.feature_store.spec.compose import ComposeSpec
 
         name = panel.build_store(engine, settings, s3, _facts())
         spec = ComposeSpec.model_validate(
@@ -358,7 +358,7 @@ def test_a_partition_orphaned_by_undo_is_found_by_verify(engine, settings, s3):
     """
     name = panel.build_store(engine, settings, s3, _facts())
     with engine.connect() as connection:
-        from feature_store.store.tables import feature_group
+        from strata.feature_store.store.tables import feature_group
 
         group_id = connection.execute(
             sa.select(feature_group.c.id).where(feature_group.c.name == name)
@@ -477,7 +477,7 @@ class TestEveryCatalogueTableIsCovered:
     """
 
     def test_a_crosswalk_parquet_is_not_an_orphan(self, engine, settings, s3, tmp_path):
-        from feature_store.store import crosswalk
+        from strata.feature_store.store import crosswalk
 
         tag = uuid.uuid4().hex[:8]
         with open_run(engine, "ingest_release", "fixture", {}) as run:
@@ -509,7 +509,7 @@ class TestEveryCatalogueTableIsCovered:
         assert version.object_key not in found.missing
 
     def test_a_materialised_composition_is_not_an_orphan(self, engine, settings, s3):
-        from feature_store.spec.compose import ComposeSpec
+        from strata.feature_store.spec.compose import ComposeSpec
 
         name = panel.build_store(engine, settings, s3, _facts())
         spec = ComposeSpec.model_validate(
@@ -531,7 +531,7 @@ class TestEveryCatalogueTableIsCovered:
 
     def test_prune_would_not_remove_them(self, engine, settings, s3, a_release):
         """The consequence, stated directly rather than inferred."""
-        from feature_store.store.tables import dataset_version
+        from strata.feature_store.store.tables import dataset_version
 
         with engine.connect() as connection:
             catalogued = set(

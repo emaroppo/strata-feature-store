@@ -6,7 +6,7 @@ from datetime import date
 
 import pytest
 
-from feature_store.spec.periods import (
+from strata.feature_store.spec.periods import (
     PERIODS,
     anchor_date,
     from_year,

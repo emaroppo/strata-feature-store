@@ -19,10 +19,10 @@ from datetime import date
 import pytest
 import sqlalchemy as sa
 
-from feature_store.store import catalog, crosswalk, duck, ingest, objects
-from feature_store.store import standardise as std
-from feature_store.store.standardise import StandardiseError
-from feature_store.store.tables import feature, feature_group
+from strata.feature_store.store import catalog, crosswalk, duck, ingest, objects
+from strata.feature_store.store import standardise as std
+from strata.feature_store.store.standardise import StandardiseError
+from strata.feature_store.store.tables import feature, feature_group
 
 pytestmark = pytest.mark.integration
 
@@ -142,7 +142,7 @@ def prepared(engine, settings, s3, tmp_path, names):
 
 
 def _run(engine, settings, s3, tmp_path, names, **overrides):
-    from feature_store.spec.standardise import StandardiseSpec
+    from strata.feature_store.spec.standardise import StandardiseSpec
 
     spec = StandardiseSpec.model_validate(_spec(names, **overrides))
     return std.standardise(
@@ -227,8 +227,8 @@ class TestTheMelt:
         self, engine, settings, s3, tmp_path, names, prepared
     ):
         """2020 data becomes knowable in March 2021, not in March 2020."""
-        from feature_store.spec.duration import parse_duration
-        from feature_store.spec.timebasis import knowledge_time_sql
+        from strata.feature_store.spec.duration import parse_duration
+        from strata.feature_store.spec.timebasis import knowledge_time_sql
 
         _run(engine, settings, s3, tmp_path, names)
         with engine.connect() as connection:
@@ -576,7 +576,7 @@ class TestPeriodsInColumns:
         }
 
     def _standardise(self, engine, settings, s3, tmp_path, names, periods_spec, source, digest):
-        from feature_store.spec.standardise import StandardiseSpec
+        from strata.feature_store.spec.standardise import StandardiseSpec
 
         payload = {**periods_spec, "source": source}
         return std.standardise(
@@ -616,7 +616,7 @@ class TestPeriodsInColumns:
                 sa.select(feature_group.c.id).where(feature_group.c.name == names["group"])
             ).scalar_one()
             keys = [p["object_key"] for p in catalog.live_partitions(connection, group_id)]
-        from feature_store.store import duck
+        from strata.feature_store.store import duck
 
         con = duck.connect(settings.storage, memory_limit="1GB")
         urls = ", ".join(f"'{duck.s3_url(settings.storage.bucket, k)}'" for k in keys)
@@ -662,7 +662,7 @@ class TestLayoutRefusals:
     """Each layout has to be coherent, and says so rather than melting nonsense."""
 
     def _validate(self, **overrides):
-        from feature_store.spec.standardise import StandardiseSpec
+        from strata.feature_store.spec.standardise import StandardiseSpec
 
         payload = {
             "feature_group": "g",
@@ -777,7 +777,7 @@ class TestVocabulary:
         return payload
 
     def _run_it(self, engine, settings, s3, tmp_path, names, source, release, vocab):
-        from feature_store.spec.standardise import StandardiseSpec
+        from strata.feature_store.spec.standardise import StandardiseSpec
 
         return std.standardise(
             engine,
@@ -847,7 +847,7 @@ class TestVocabulary:
     ):
         """Undocumented is not the same as non-existent."""
         source, release, vocab = with_vocabulary
-        from feature_store.spec.standardise import StandardiseSpec
+        from strata.feature_store.spec.standardise import StandardiseSpec
 
         payload = self._spec(names, source, vocab.sha256[:12])
         payload["features"]["vocabulary"]["key"] = "Series Code"
@@ -869,7 +869,7 @@ class TestVocabulary:
         self, engine, settings, s3, tmp_path, names, with_vocabulary
     ):
         source, release, vocab = with_vocabulary
-        from feature_store.spec.standardise import StandardiseSpec
+        from strata.feature_store.spec.standardise import StandardiseSpec
 
         payload = self._spec(names, source, vocab.sha256[:12])
         payload["features"]["vocabulary"]["unit"] = "No Such Column"

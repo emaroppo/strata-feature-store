@@ -27,14 +27,14 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from feature_store.spec import schema as long_schema
-from feature_store.spec.compose import ComposeSpec, FeatureRef
-from feature_store.spec.duration import add_duration, parse_duration
-from feature_store.spec.timebasis import knowledge_time_sql
-from feature_store.store import catalog, duck
-from feature_store.store.config import Settings
-from feature_store.store.tables import entity_list, entity_list_member, entity_list_version
-from feature_store.store.tables import feature_group as feature_group_table
+from strata.feature_store.spec import schema as long_schema
+from strata.feature_store.spec.compose import ComposeSpec, FeatureRef
+from strata.feature_store.spec.duration import add_duration, parse_duration
+from strata.feature_store.spec.timebasis import knowledge_time_sql
+from strata.feature_store.store import catalog, duck
+from strata.feature_store.store.config import Settings
+from strata.feature_store.store.tables import entity_list, entity_list_member, entity_list_version
+from strata.feature_store.store.tables import feature_group as feature_group_table
 
 
 class ComposeError(RuntimeError):
@@ -160,7 +160,7 @@ def _resolve_dtypes(
     The registry is what makes a typo in a feature name fail here rather than
     resolving to a column of nulls that looks like missing data.
     """
-    from feature_store.store.tables import feature as feature_table
+    from strata.feature_store.store.tables import feature as feature_table
 
     out: dict[str, str] = {}
     for ref in spec.features:
@@ -258,7 +258,7 @@ def _watermark(connection: sa.Connection, groups: dict[str, ResolvedGroup]) -> d
 
     Pinned into a frozen version so a later arrival cannot change the answer.
     """
-    from feature_store.store.tables import feature_partition
+    from strata.feature_store.store.tables import feature_partition
 
     highest = connection.execute(
         sa.select(sa.func.max(feature_partition.c.ingest_time)).where(
@@ -632,10 +632,10 @@ def freeze(
     query form, and ``test_materialized_equals_query`` is what keeps that true
     rather than merely intended.
     """
-    from feature_store.spec.canonical import content_hash, to_jsonable
-    from feature_store.store import objects
-    from feature_store.store.runs import run as open_run
-    from feature_store.store.tables import dataset, dataset_version
+    from strata.feature_store.spec.canonical import content_hash, to_jsonable
+    from strata.feature_store.store import objects
+    from strata.feature_store.store.runs import run as open_run
+    from strata.feature_store.store.tables import dataset, dataset_version
 
     s3 = s3 or objects.client(settings.storage)
     canonical = to_jsonable(spec.canonical())
@@ -683,7 +683,7 @@ def freeze(
             import tempfile
             from pathlib import Path
 
-            from feature_store.spec.canonical import hash_file
+            from strata.feature_store.spec.canonical import hash_file
 
             work = Path(tempfile.mkdtemp(prefix="feature-store-compose-"))
             local = work / "part.parquet"
@@ -748,7 +748,7 @@ def freeze(
 
 def load_version(connection: sa.Connection, name: str, version: int | None = None) -> dict:
     """A frozen version's row, defaulting to the newest."""
-    from feature_store.store.tables import dataset, dataset_version
+    from strata.feature_store.store.tables import dataset, dataset_version
 
     query = (
         sa.select(dataset_version)

@@ -6,7 +6,7 @@ from datetime import date
 
 import pytest
 
-from feature_store.spec.duration import (
+from strata.feature_store.spec.duration import (
     Duration,
     add_duration,
     format_duration,

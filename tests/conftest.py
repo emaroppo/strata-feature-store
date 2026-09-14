@@ -115,8 +115,8 @@ def storage_settings():
     sources is one environment variable away, so the default is local and any
     override has to be deliberate.
     """
-    from feature_store.store import objects
-    from feature_store.store.config import StorageSettings
+    from strata.feature_store.store import objects
+    from strata.feature_store.store.config import StorageSettings
 
     made = StorageSettings(
         endpoint_url=os.environ.get("FEATURE_STORE_TEST_S3_ENDPOINT", "http://localhost:3900"),
@@ -139,14 +139,14 @@ def storage_settings():
 
 @pytest.fixture(scope="session")
 def s3(storage_settings):
-    from feature_store.store import objects
+    from strata.feature_store.store import objects
 
     return objects.client(storage_settings)
 
 
 @pytest.fixture(scope="session")
 def settings(migrated_database_url: str, storage_settings):
-    from feature_store.store.config import CatalogSettings, Settings
+    from strata.feature_store.store.config import CatalogSettings, Settings
 
     return Settings(
         catalog=CatalogSettings(url=migrated_database_url),

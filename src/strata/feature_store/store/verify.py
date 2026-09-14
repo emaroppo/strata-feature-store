@@ -27,17 +27,17 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from feature_store.spec.canonical import hash_file
-from feature_store.store import duck, objects
-from feature_store.store.config import Settings
-from feature_store.store.tables import (
+from strata.feature_store.spec.canonical import hash_file
+from strata.feature_store.store import duck, objects
+from strata.feature_store.store.config import Settings
+from strata.feature_store.store.tables import (
     dataset_version,
     feature,
     feature_group,
     feature_partition,
     release,
 )
-from feature_store.store.tables import run as run_table
+from strata.feature_store.store.tables import run as run_table
 
 
 @dataclass
@@ -201,7 +201,7 @@ def _registry_drift(engine: sa.Engine, settings: Settings, *, run_id: int | None
     incomplete, so nothing can discover the feature, and a spec naming it is
     refused even though the data is there.
     """
-    from feature_store.store import catalog
+    from strata.feature_store.store import catalog
 
     drift: list[str] = []
     with engine.connect() as connection:
@@ -255,7 +255,7 @@ def undo(engine: sa.Engine, settings: Settings, run_id: int, *, s3=None) -> dict
     dangling pin, and a frozen version that no longer resolves is worse than a
     partition that will not delete.
     """
-    from feature_store.store.tables import dataset_version, run_input, run_output
+    from strata.feature_store.store.tables import dataset_version, run_input, run_output
 
     s3 = s3 or objects.client(settings.storage)
     bucket = settings.storage.bucket
@@ -361,7 +361,7 @@ def prune_release(engine: sa.Engine, settings: Settings, digest_prefix: str, *, 
     silently discards its own sources cannot answer why a number changed, and
     re-standardising from the original bytes is the whole reason they are kept.
     """
-    from feature_store.store import catalog
+    from strata.feature_store.store import catalog
 
     s3 = s3 or objects.client(settings.storage)
     with engine.connect() as connection:

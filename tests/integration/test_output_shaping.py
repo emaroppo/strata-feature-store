@@ -14,10 +14,10 @@ from datetime import date, datetime
 import pytest
 import sqlalchemy as sa
 
-from feature_store.spec.compose import ComposeSpec
-from feature_store.store import catalog, compose
-from feature_store.store.compose import ComposeError
-from feature_store.store.runs import run as open_run
+from strata.feature_store.spec.compose import ComposeSpec
+from strata.feature_store.store import catalog, compose
+from strata.feature_store.store.compose import ComposeError
+from strata.feature_store.store.runs import run as open_run
 
 from ..pit import panel
 
@@ -38,8 +38,8 @@ def group(engine, settings, s3) -> str:
 
 def _register_features(engine, group_name: str, features: dict[str, str]) -> None:
     """Override the dtype build_store recorded, for the string cases."""
-    from feature_store.store.tables import feature as feature_table
-    from feature_store.store.tables import feature_group
+    from strata.feature_store.store.tables import feature as feature_table
+    from strata.feature_store.store.tables import feature_group
 
     with engine.begin() as connection:
         group_id = connection.execute(
@@ -189,7 +189,7 @@ class TestRetraction:
         ]
         name = panel.build_store(engine, settings, s3, facts)
         with engine.begin() as connection:
-            from feature_store.store.tables import feature_group
+            from strata.feature_store.store.tables import feature_group
 
             connection.execute(
                 sa.update(feature_group)

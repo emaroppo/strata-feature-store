@@ -43,9 +43,9 @@ from typing import Any, Iterator
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from feature_store.spec.canonical import canonical_bytes, content_hash, to_jsonable
-from feature_store.store.tables import run as run_table
-from feature_store.store.tables import run_input, run_output
+from strata.feature_store.spec.canonical import canonical_bytes, content_hash, to_jsonable
+from strata.feature_store.store.tables import run as run_table
+from strata.feature_store.store.tables import run_input, run_output
 
 MANIFEST_PREFIX = "runs"
 
@@ -330,7 +330,7 @@ def manifest_key_for(current: Run, started: datetime) -> str:
 
 
 def write_manifest(s3, bucket: str, current: Run, started: datetime) -> str:
-    from feature_store.store.objects import put_bytes
+    from strata.feature_store.store.objects import put_bytes
 
     key = manifest_key_for(current, started)
     payload = canonical_bytes(manifest(current, started))

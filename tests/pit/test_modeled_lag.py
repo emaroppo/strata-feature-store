@@ -25,8 +25,8 @@ from datetime import date, datetime
 import pytest
 import sqlalchemy as sa
 
-from feature_store.store import catalog, compose
-from feature_store.store.tables import feature_group, feature_partition
+from strata.feature_store.store import catalog, compose
+from strata.feature_store.store.tables import feature_group, feature_partition
 
 from . import panel
 
@@ -80,7 +80,7 @@ def derived(engine, settings, s3) -> str:
 
 
 def _spec(group: str, cutoff: datetime):
-    from feature_store.spec.compose import ComposeSpec
+    from strata.feature_store.spec.compose import ComposeSpec
 
     return ComposeSpec.model_validate(
         {
@@ -227,7 +227,7 @@ def test_correcting_the_lag_does_not_touch_the_bytes(engine, settings, derived):
 
 def test_the_stored_column_is_actually_null(engine, settings, s3, derived):
     """The claim is that nothing was written, not that it was written and ignored."""
-    from feature_store.store import duck
+    from strata.feature_store.store import duck
 
     with engine.connect() as connection:
         group_id = connection.execute(

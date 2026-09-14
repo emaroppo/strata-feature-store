@@ -33,10 +33,10 @@ import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 
-from feature_store.spec.canonical import hash_file
+from strata.feature_store.spec.canonical import hash_file
 
 if TYPE_CHECKING:  # pragma: no cover
-    from feature_store.store.config import StorageSettings
+    from strata.feature_store.store.config import StorageSettings
 
 #: Where raw release bytes live. Fanned out two levels so no single prefix holds
 #: every object, which keeps listing usable on stores that paginate by prefix.

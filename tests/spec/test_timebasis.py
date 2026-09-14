@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from feature_store.spec.duration import parse_duration
-from feature_store.spec.timebasis import (
+from strata.feature_store.spec.duration import parse_duration
+from strata.feature_store.spec.timebasis import (
     DERIVED,
     FIDELITY,
     interval_sql,
@@ -126,8 +126,8 @@ class TestEveryBasisIsResolvable:
         """
         from datetime import datetime
 
-        from feature_store.spec.standardise import StandardiseSpec
-        from feature_store.store.standardise import _melt_query
+        from strata.feature_store.spec.standardise import StandardiseSpec
+        from strata.feature_store.store.standardise import _melt_query
 
         knowledge: dict = {"basis": basis}
         if basis == "file_release":

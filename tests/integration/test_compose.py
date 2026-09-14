@@ -17,11 +17,11 @@ from datetime import date, datetime
 import pytest
 import sqlalchemy as sa
 
-from feature_store.spec.compose import ComposeSpec
-from feature_store.store import catalog, compose, duck
-from feature_store.store.compose import ComposeError
-from feature_store.store.runs import run as open_run
-from feature_store.store.tables import feature_group, feature_partition
+from strata.feature_store.spec.compose import ComposeSpec
+from strata.feature_store.store import catalog, compose, duck
+from strata.feature_store.store.compose import ComposeError
+from strata.feature_store.store.runs import run as open_run
+from strata.feature_store.store.tables import feature_group, feature_partition
 
 pytestmark = pytest.mark.integration
 
@@ -38,7 +38,7 @@ def _write_facts(engine, settings, s3, rows, *, group_name, namespace=NAMESPACE)
     import tempfile
     from pathlib import Path
 
-    from feature_store.spec.canonical import hash_file
+    from strata.feature_store.spec.canonical import hash_file
 
     work = Path(tempfile.mkdtemp())
     parquet = work / "part.parquet"
@@ -111,7 +111,7 @@ def _write_facts(engine, settings, s3, rows, *, group_name, namespace=NAMESPACE)
             # composition resolves dtypes from. Registered from the feature
             # names rather than skipped, because a group without it is not a
             # faithful stand-in for a real one.
-            from feature_store.store.tables import feature as feature_table
+            from strata.feature_store.store.tables import feature as feature_table
 
             fresh = sorted({r[4] for r in rows} - existing_features)
             if fresh:
@@ -435,7 +435,7 @@ def test_read_writes_parquet_to_a_path(engine, settings, s3, revised, tmp_path):
     relation.to_parquet(str(out))
     assert out.exists()
 
-    from feature_store.store import duck
+    from strata.feature_store.store import duck
 
     rows = duck.connect().execute(f"SELECT count(*) FROM read_parquet('{out}')").fetchone()[0]
     assert rows == 3, "one row per spine timestamp"

@@ -21,10 +21,10 @@ from pathlib import Path
 
 import sqlalchemy as sa
 
-from feature_store.spec.canonical import hash_file
-from feature_store.store import catalog, duck
-from feature_store.store.runs import run as open_run
-from feature_store.store.tables import feature_group, feature_partition
+from strata.feature_store.spec.canonical import hash_file
+from strata.feature_store.store import catalog, duck
+from strata.feature_store.store.runs import run as open_run
+from strata.feature_store.store.tables import feature_group, feature_partition
 
 NAMESPACE = "iso3166-1-alpha3"
 ENTITIES = ("AAA", "BBB", "CCC")
@@ -217,7 +217,7 @@ def build_store(
             # exists before it holds any. That distinction is what lets a typo
             # in a spec fail while a feature with nothing published yet
             # correctly resolves to null.
-            from feature_store.store.tables import feature as feature_table
+            from strata.feature_store.store.tables import feature as feature_table
 
             connection.execute(
                 sa.insert(feature_table),
@@ -243,7 +243,7 @@ def build_store(
 
 def spec_for(group: str, cutoff: datetime, *, name: str | None = None, max_age: str | None = None):
     """One spec, resolved at a fixed moment, selecting every feature."""
-    from feature_store.spec.compose import ComposeSpec
+    from strata.feature_store.spec.compose import ComposeSpec
 
     feature = {"group": group}
     return ComposeSpec.model_validate(
@@ -274,7 +274,7 @@ def spec_for(group: str, cutoff: datetime, *, name: str | None = None, max_age: 
 
 
 def resolve_rows(engine, settings, spec) -> list[tuple]:
-    from feature_store.store import compose
+    from strata.feature_store.store import compose
 
     with engine.connect() as connection:
         plan = compose.plan(connection, spec, settings)

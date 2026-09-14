@@ -13,7 +13,7 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-from feature_store.spec.canonical import (
+from strata.feature_store.spec.canonical import (
     canonical_bytes,
     canonical_json,
     content_hash,

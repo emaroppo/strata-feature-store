@@ -29,12 +29,12 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from feature_store.spec.canonical import hash_file, to_jsonable
-from feature_store.store import catalog, duck, objects
-from feature_store.store.config import Settings
-from feature_store.store.runs import Run
-from feature_store.store.runs import run as open_run
-from feature_store.store.tables import dataset, dataset_version
+from strata.feature_store.spec.canonical import hash_file, to_jsonable
+from strata.feature_store.store import catalog, duck, objects
+from strata.feature_store.store.config import Settings
+from strata.feature_store.store.runs import Run
+from strata.feature_store.store.runs import run as open_run
+from strata.feature_store.store.tables import dataset, dataset_version
 
 CROSSWALK_PREFIX = "crosswalks"
 

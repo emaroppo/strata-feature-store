@@ -1,4 +1,4 @@
-# feature-store
+# strata-feature-store
 
 Point-in-time correct storage, standardisation and retrieval for panel data that
 gets revised.

@@ -1,7 +1,7 @@
-"""Catalog writes. Every one of them takes a :class:`~feature_store.store.runs.Run`.
+"""Catalog writes. Every one of them takes a :class:`~strata.feature_store.store.runs.Run`.
 
 That first parameter is invariant 4. A ``Run`` cannot be constructed directly —
-only :func:`feature_store.store.runs.run` yields one, and it has already inserted
+only :func:`strata.feature_store.store.runs.run` yields one, and it has already inserted
 the run row before it does. So there is no way to write a catalog row without
 lineage, and none of these functions has to remember to record it.
 
@@ -16,8 +16,8 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from feature_store.store.runs import Run
-from feature_store.store.tables import entity_namespace, release, source
+from strata.feature_store.store.runs import Run
+from strata.feature_store.store.tables import entity_namespace, release, source
 
 
 class CatalogError(RuntimeError):
@@ -242,8 +242,8 @@ def live_partitions(
     This is also invariant 7: the file list comes from here, never from listing
     a prefix, so the orphans a failed run leaves behind stay invisible.
     """
-    from feature_store.store.tables import feature_partition
-    from feature_store.store.tables import run as run_table
+    from strata.feature_store.store.tables import feature_partition
+    from strata.feature_store.store.tables import run as run_table
 
     query = (
         sa.select(feature_partition)
@@ -281,7 +281,11 @@ def add_entity_list(
     would otherwise rewrite what an earlier composition meant, which is the same
     failure that makes crosswalks pinned rather than resolved.
     """
-    from feature_store.store.tables import entity_list, entity_list_member, entity_list_version
+    from strata.feature_store.store.tables import (
+        entity_list,
+        entity_list_member,
+        entity_list_version,
+    )
 
     unique = sorted(set(members))
     if not unique:
@@ -325,7 +329,11 @@ def add_entity_list(
 
 
 def list_entity_lists(connection: sa.Connection) -> list[dict[str, Any]]:
-    from feature_store.store.tables import entity_list, entity_list_member, entity_list_version
+    from strata.feature_store.store.tables import (
+        entity_list,
+        entity_list_member,
+        entity_list_version,
+    )
 
     members = (
         sa.select(

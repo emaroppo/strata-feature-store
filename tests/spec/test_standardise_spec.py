@@ -12,7 +12,7 @@ from datetime import date
 import pytest
 from pydantic import ValidationError
 
-from feature_store.spec.standardise import (
+from strata.feature_store.spec.standardise import (
     FeatureMetaSpec,
     KnowledgeTimeSpec,
     StandardiseSpec,

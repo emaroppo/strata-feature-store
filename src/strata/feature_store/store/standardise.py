@@ -27,15 +27,15 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from feature_store.spec import schema as long_schema
-from feature_store.spec.canonical import content_hash, hash_file, short_hash, to_jsonable
-from feature_store.spec.periods import UNBOUNDED
-from feature_store.spec.standardise import StandardiseSpec, decompose
-from feature_store.store import catalog, duck, objects
-from feature_store.store.config import Settings
-from feature_store.store.runs import Run
-from feature_store.store.runs import run as open_run
-from feature_store.store.tables import feature, feature_group, feature_partition
+from strata.feature_store.spec import schema as long_schema
+from strata.feature_store.spec.canonical import content_hash, hash_file, short_hash, to_jsonable
+from strata.feature_store.spec.periods import UNBOUNDED
+from strata.feature_store.spec.standardise import StandardiseSpec, decompose
+from strata.feature_store.store import catalog, duck, objects
+from strata.feature_store.store.config import Settings
+from strata.feature_store.store.runs import Run
+from strata.feature_store.store.runs import run as open_run
+from strata.feature_store.store.tables import feature, feature_group, feature_partition
 
 FEATURES_PREFIX = "features"
 
@@ -215,7 +215,7 @@ def _melt_query(
 
 def _anchor_sql(expression: str, period: str, anchor: str) -> str:
     """Snap a parsed period label to the end (or start) of its period."""
-    from feature_store.spec.timebasis import period_end_sql, period_start_sql
+    from strata.feature_store.spec.timebasis import period_end_sql, period_start_sql
 
     if period in UNBOUNDED:
         return expression
@@ -479,7 +479,7 @@ def _existing_part(run: Run, group_id: int, input_hash: str) -> dict[str, Any] |
     among partitions whose creating run finished — a part left behind by a run
     that died is not evidence the work was done.
     """
-    from feature_store.store.tables import run as run_table
+    from strata.feature_store.store.tables import run as run_table
 
     with run.transaction() as connection:
         row = (
@@ -620,7 +620,7 @@ def _supersede_previous(run: Run, group_ids: list[int], release_id: int) -> int:
     keeps resolving to what it resolved to then — the whole point of pinning —
     and ``verify`` can still account for the bytes.
     """
-    from feature_store.store.tables import run_input, run_output
+    from strata.feature_store.store.tables import run_input, run_output
 
     if not group_ids:
         return 0
@@ -665,7 +665,7 @@ def standardise(
     progress=None,
 ) -> StandardiseResult:
     """Turn one release into long-format parquet, and record what happened."""
-    from feature_store.store import crosswalk as cw_module
+    from strata.feature_store.store import crosswalk as cw_module
 
     s3 = s3 or objects.client(settings.storage)
     bucket = settings.storage.bucket
@@ -927,7 +927,7 @@ def check_granularity(con, spec: StandardiseSpec, granularity: str) -> int:
     """
     if granularity in UNBOUNDED:
         return 0
-    from feature_store.spec.timebasis import period_end_sql, period_start_sql
+    from strata.feature_store.spec.timebasis import period_end_sql, period_start_sql
 
     boundary = (
         period_start_sql("event_time", granularity)

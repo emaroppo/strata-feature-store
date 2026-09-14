@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 import duckdb
 
 if TYPE_CHECKING:  # pragma: no cover
-    from feature_store.store.config import StorageSettings
+    from strata.feature_store.store.config import StorageSettings
 
 #: Sorting a few hundred million rows does not fit in memory, and the default
 #: limit makes DuckDB fail rather than spill. Left well under total RAM so the

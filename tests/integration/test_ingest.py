@@ -14,10 +14,10 @@ from datetime import date
 import pytest
 import sqlalchemy as sa
 
-from feature_store.store import catalog, ingest, objects
-from feature_store.store.runs import run as open_run
-from feature_store.store.tables import release as release_table
-from feature_store.store.tables import run as run_table
+from strata.feature_store.store import catalog, ingest, objects
+from strata.feature_store.store.runs import run as open_run
+from strata.feature_store.store.tables import release as release_table
+from strata.feature_store.store.tables import run as run_table
 
 pytestmark = pytest.mark.integration
 
@@ -164,7 +164,7 @@ class TestTheReleaseRow:
         assert ("release", result.release_id) in rows
 
     def test_a_manifest_is_written_and_readable(self, engine, settings, prepared, a_file, s3):
-        from feature_store.store.runs import read_manifest
+        from strata.feature_store.store.runs import read_manifest
 
         path = a_file("code,year,gdp\nAAA,2024,2.1\n")
         result = ingest.add_release(
