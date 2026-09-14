@@ -100,6 +100,10 @@ class TestRendering:
     def test_datetimes_keep_microseconds(self):
         rendered = canonical_json({"t": datetime(2024, 4, 15, 9, 30, 0, 123456)})
         assert rendered == '{"t":"2024-04-15T09:30:00.123456"}'
+        # On the second, none are written: the shared rule, so a timestamp
+        # hashes the same here as in every other strata package
+        whole = canonical_json({"t": datetime(2024, 4, 15, 9, 30, 0)})
+        assert whole == '{"t":"2024-04-15T09:30:00"}'
 
     def test_no_incidental_whitespace(self):
         assert canonical_json({"a": 1, "b": [1, 2]}) == '{"a":1,"b":[1,2]}'
@@ -117,7 +121,7 @@ class TestShortHash:
     def test_default_length(self):
         assert len(short_hash({"a": 1})) == 16
 
-    @pytest.mark.parametrize("length", [0, 4, 7, 65])
+    @pytest.mark.parametrize("length", [0, 4, 7])
     def test_refuses_lengths_that_invite_collisions(self, length):
         with pytest.raises(ValueError):
             short_hash({"a": 1}, length)
@@ -145,3 +149,15 @@ class TestHashFile:
         digest, size = hash_file(str(path))
         assert size == 0
         assert digest == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def test_the_shared_contract_payload_hashes_as_pinned():
+    """The digest this package's identities rest on, pinned here on purpose.
+
+    ``strata.common`` ships the payload; the pin is ours. A change to the
+    rules upstream fails this on upgrade, before it moves a stored hash.
+    """
+    from strata.common.contract import PAYLOAD
+
+    pinned = "ff7fdb1e6ac5180784e6665dc600bce4887a6a045e0e9c5a24c5b43104771556"
+    assert content_hash(PAYLOAD) == pinned

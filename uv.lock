@@ -643,6 +643,20 @@ wheels = [
 ]
 
 [[package]]
+name = "strata-common"
+version = "0.1.0"
+source = { editable = "../common" }
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", marker = "extra == 'migrations'", specifier = ">=1.13" },
+    { name = "pytest", marker = "extra == 'test'", specifier = ">=8.0" },
+    { name = "sqlalchemy", marker = "extra == 'migrations'", specifier = ">=2.0" },
+    { name = "uvicorn", marker = "extra == 'service'", specifier = ">=0.20" },
+]
+provides-extras = ["migrations", "service", "test"]
+
+[[package]]
 name = "strata-feature-store"
 version = "0.1.0"
 source = { editable = "." }
@@ -656,6 +670,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "rich" },
     { name = "sqlalchemy" },
+    { name = "strata-common" },
     { name = "typer" },
 ]
 
@@ -677,6 +692,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7" },
     { name = "rich", specifier = ">=13.0" },
     { name = "sqlalchemy", specifier = ">=2.0" },
+    { name = "strata-common", editable = "../common" },
     { name = "typer", specifier = ">=0.12" },
 ]
 

@@ -7,6 +7,8 @@ dependencies = [
     # The spec subpackage needs this and nothing else. Everything below is
     # store-only; see the purity test in tests/spec.
     "pydantic>=2.7",
+    # The canonical form that gets hashed, one implementation across the strata packages.
+    "strata-common>=0.1,<0.2",
     # Catalog. psycopg because there is no SQLite fallback by design.
     "sqlalchemy>=2.0",
     "alembic>=1.13",
@@ -32,6 +34,10 @@ dev = [
     "ruff>=0.6",
     "hypothesis>=6.100",
 ]
+
+[tool.uv.sources]
+# Beside this repository in the strata checkout until the split publishes it.
+strata-common = { path = "../common", editable = true }
 
 [build-system]
 requires = ["hatchling"]
