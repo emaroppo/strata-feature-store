@@ -272,11 +272,11 @@ class TestStoredEntityLists:
             _relation(engine, settings, spec)
 
     def test_an_empty_list_is_refused_at_creation(self, engine):
-        with pytest.raises(catalog.CatalogError, match="selects nothing"):
-            with open_run(engine, "ingest_release", "empty", {}) as run:
-                catalog.add_entity_list(
-                    run, name="empty", entity_namespace=panel.NAMESPACE, members=[]
-                )
+        with (
+            pytest.raises(catalog.CatalogError, match="selects nothing"),
+            open_run(engine, "ingest_release", "empty", {}) as run,
+        ):
+            catalog.add_entity_list(run, name="empty", entity_namespace=panel.NAMESPACE, members=[])
 
 
 class TestStalenessArithmetic:

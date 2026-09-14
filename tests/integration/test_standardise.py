@@ -13,6 +13,7 @@ reporting success.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import date
 
@@ -702,7 +703,7 @@ class TestLayoutRefusals:
     def test_periods_in_columns_needs_a_name_column(self):
         from pydantic import ValidationError
 
-        with pytest.raises(ValidationError, match="features.name.source"):
+        with pytest.raises(ValidationError, match=re.escape("features.name.source")):
             self._validate(features={"name": {"source": "column_name"}})
 
     def test_features_in_columns_needs_an_event_time_column(self):
@@ -888,7 +889,7 @@ class TestVocabulary:
         self, engine, settings, s3, tmp_path, names, with_vocabulary
     ):
         """Lineage has to show both files, or the description has no provenance."""
-        source, release, vocab = with_vocabulary
+        _source, release, vocab = with_vocabulary
         result = self._run_it(engine, settings, s3, tmp_path, names, *with_vocabulary)
         with engine.connect() as connection:
             inputs = connection.execute(

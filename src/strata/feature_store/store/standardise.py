@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -62,7 +62,7 @@ class StandardiseResult:
 
 
 def _naive_utc_now() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _quote(name: str) -> str:
@@ -324,7 +324,7 @@ def read_vocabulary(con, local_path: str, spec: StandardiseSpec) -> dict[str, di
 
     described: dict[str, dict[str, Any]] = {}
     for row in con.execute(f"SELECT {selected} FROM {reader}").fetchall():
-        entry = dict(zip(dict.fromkeys(wanted), row))
+        entry = dict(zip(dict.fromkeys(wanted), row, strict=True))
         key = entry.pop(vocabulary.key, None)
         if not key:
             continue
@@ -854,7 +854,7 @@ def standardise(
 
         registered = 0
         if not dry_run:
-            for group_name, group_id in groups.items():
+            for _group_name, group_id in groups.items():
                 registered += _register_features(
                     current, group_id, vocabulary, spec, described
                 )

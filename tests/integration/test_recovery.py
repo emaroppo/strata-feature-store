@@ -285,7 +285,7 @@ class TestUndo:
                 sa.select(run_table.c.id)
                 .where(run_table.c.name.like(f"freeze {spec.name}%"))
             ).scalar_one()
-        with pytest.raises(verify.UndoError, match="[Ff]rozen"):
+        with pytest.raises(verify.UndoError, match=r"[Ff]rozen"):
             verify.undo(engine, settings, run_id, s3=s3)
         assert frozen.version_num == 1
 
@@ -449,10 +449,9 @@ class TestPruneOrphans:
     def test_debris_from_a_failed_run_is_removed(self, engine, settings, s3, a_release):
         """Those runs are over, and what they left is what this exists to clear."""
         key = self._plant(s3, settings)
-        with pytest.raises(ValueError):
-            with open_run(engine, "standardise", "died", {}) as run:
-                run.wrote("feature_partition", 999_125)
-                raise ValueError("mid-write")
+        with pytest.raises(ValueError), open_run(engine, "standardise", "died", {}) as run:
+            run.wrote("feature_partition", 999_125)
+            raise ValueError("mid-write")
         result = verify.prune_orphans(engine, settings, s3=s3)
         assert key in result["removed"]
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -86,7 +86,7 @@ class TestRefusals:
     def test_aware_datetimes(self):
         """Naive UTC throughout; an offset means something skipped the edge."""
         with pytest.raises(ValueError, match="timezone"):
-            canonical_json({"t": datetime(2024, 1, 1, tzinfo=timezone.utc)})
+            canonical_json({"t": datetime(2024, 1, 1, tzinfo=UTC)})
 
     def test_an_unknown_type(self):
         with pytest.raises(TypeError, match="no canonical form"):

@@ -96,7 +96,7 @@ class TestFidelity:
 
 def test_only_modeled_lag_is_derived():
     """Every other basis materialises the column, so a null there is an error."""
-    assert DERIVED == frozenset({"modeled_lag"})
+    assert frozenset({"modeled_lag"}) == DERIVED
 
 
 class TestEveryBasisIsResolvable:
@@ -114,7 +114,7 @@ class TestEveryBasisIsResolvable:
 
     def test_the_derived_basis_is_the_only_one_that_may_be_null(self):
         """And it is null on disk precisely because the rule replaces it."""
-        assert DERIVED == frozenset({"modeled_lag"})
+        assert frozenset({"modeled_lag"}) == DERIVED
 
     @pytest.mark.parametrize("basis", FIDELITY)
     def test_the_melt_writes_something_for_every_stored_basis(self, basis):

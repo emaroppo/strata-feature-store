@@ -59,8 +59,12 @@ target-version = "py313"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-# Pinned: ruff's default set widens between releases.
-select = ["E", "F", "I"]
+# Pinned: ruff's default set widens between releases. The same set as the
+# other strata packages, widened once, on purpose.
+select = ["E", "F", "I", "B", "SIM", "DTZ", "UP", "C4", "RUF"]
+# Every timestamp is naive UTC by decision (docs/adr/0012), so the rules
+# that ask for a tzinfo would ask for the opposite of the design.
+ignore = ["DTZ001", "DTZ005"]
 
 [tool.ruff.lint.per-file-ignores]
 # Alembic writes these, and it emits table and column comments as single long
@@ -72,3 +76,5 @@ select = ["E", "F", "I"]
 # has them unused, ruff --fix strips them, and the next hand-edit that needs op
 # fails with a NameError at migration time rather than at lint time.
 "src/strata/feature_store/store/migrations/versions/*" = ["E501", "F401"]
+# typer declares options as call defaults; that is its idiom, not a bug
+"src/strata/feature_store/store/cli.py" = ["B008"]

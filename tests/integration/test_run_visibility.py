@@ -112,10 +112,9 @@ def test_a_running_run_has_no_live_partitions(engine, group):
 
 def test_a_failed_runs_partitions_stay_invisible(engine, group):
     """The rows remain, for verify and undo to reconcile. Readers never see them."""
-    with pytest.raises(ValueError):
-        with open_run(engine, "standardise", "dies midway", {}) as current:
-            _add_partition(current, group, "doomed")
-            raise ValueError("batch 12 of 13")
+    with pytest.raises(ValueError), open_run(engine, "standardise", "dies midway", {}) as current:
+        _add_partition(current, group, "doomed")
+        raise ValueError("batch 12 of 13")
 
     with engine.connect() as observer:
         assert catalog.live_partitions(observer, group) == []
@@ -157,10 +156,12 @@ def test_invariant_one_still_fails_the_run(engine, group):
         up.observed_knowledge_time(datetime(2025, 3, 12))
         up.wrote("feature_partition", 999_001)
 
-    with pytest.raises(LineageError, match="should not have been able to see"):
-        with open_run(engine, "compose", "downstream", {}) as down:
-            down.read("feature_partition", 999_001)
-            down.observed_knowledge_time(datetime(2020, 1, 1))
+    with (
+        pytest.raises(LineageError, match="should not have been able to see"),
+        open_run(engine, "compose", "downstream", {}) as down,
+    ):
+        down.read("feature_partition", 999_001)
+        down.observed_knowledge_time(datetime(2020, 1, 1))
 
     with engine.connect() as observer:
         status = observer.execute(

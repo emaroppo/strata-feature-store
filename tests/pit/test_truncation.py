@@ -24,6 +24,7 @@ runs in seconds.
 from __future__ import annotations
 
 from datetime import datetime
+from itertools import pairwise
 
 import pytest
 
@@ -133,7 +134,7 @@ def test_a_later_cutoff_sees_at_least_as_much(engine, settings, s3, full_store):
         }
         for t in moments
     ]
-    for earlier, later, (t1, t2) in zip(seen, seen[1:], zip(moments, moments[1:])):
+    for (earlier, later), (t1, t2) in zip(pairwise(seen), pairwise(moments), strict=True):
         for key, value in earlier.items():
             if value is None:
                 continue

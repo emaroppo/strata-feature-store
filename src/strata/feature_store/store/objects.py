@@ -25,9 +25,10 @@ S3 mocks worthless.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING
 
 import boto3
 from botocore.config import Config as BotoConfig

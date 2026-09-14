@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import mimetypes
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +40,7 @@ class IngestResult:
 
 
 def _naive_utc_now() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def register_source(

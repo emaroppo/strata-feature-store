@@ -30,15 +30,17 @@ every catalog row when the last batch failed.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import platform
 import subprocess
 import sys
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Iterator
+from datetime import UTC, datetime
+from typing import Any
 
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -172,10 +174,8 @@ def environment() -> dict[str, Any]:
     """What produced this, to the precision that matters for reproducing it."""
     versions: dict[str, str] = {}
     for module in ("duckdb", "pyarrow", "polars", "sqlalchemy"):
-        try:
+        with contextlib.suppress(Exception):  # absent is a fine answer
             versions[module] = __import__(module).__version__
-        except Exception:  # pragma: no cover - absent is a fine answer
-            pass
     return {
         "python": sys.version.split()[0],
         "platform": platform.platform(),
@@ -187,7 +187,7 @@ def environment() -> dict[str, Any]:
 
 def _naive_utc_now() -> datetime:
     """Naive UTC, matching every timestamp in the store."""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def _inputs_max_knowledge_time(connection: sa.Connection, run_id: int) -> datetime | None:
