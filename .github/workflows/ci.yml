@@ -11,8 +11,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
+      - run: .github/sibling-wheels.sh common
+      - run: uv sync --no-cache --find-links dist
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync ruff format --check .
 
   unit:
     runs-on: ubuntu-latest
@@ -30,4 +32,6 @@ jobs:
       # them here would say "336 tests passed" while 194 of them never
       # executed. Deselecting says what is true: this job covers lint and the
       # pure core. See TODO.md for bringing the rest of the suite into CI.
-      - run: uv run pytest -q -m "not integration"
+      - run: .github/sibling-wheels.sh common
+      - run: uv sync --no-cache --find-links dist
+      - run: uv run --no-sync pytest -q -m "not integration"
