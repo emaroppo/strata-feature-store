@@ -103,5 +103,4 @@ with no ISO3 equivalent — mostly aggregates like `AFE` ("Africa Eastern and
 Southern") — routed rather than dropped.
 
 Of the 336 tests, 194 need a live Postgres and Garage and so run only against
-the local dev stack; CI covers lint and the 142 pure-core tests. `TODO.md` has
-what is owed, including bringing the rest into CI.
+the local dev stack; CI covers lint and the 142 pure-core tests.

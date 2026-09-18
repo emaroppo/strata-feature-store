@@ -31,7 +31,7 @@ jobs:
       # when they are missing -- which is invisible in a green check. Running
       # them here would say "336 tests passed" while 194 of them never
       # executed. Deselecting says what is true: this job covers lint and the
-      # pure core. See TODO.md for bringing the rest of the suite into CI.
+      # pure core; the rest needs the local stack.
       - run: .github/sibling-wheels.sh common
       - run: uv sync --no-cache --find-links dist
       - run: uv run --no-sync pytest -q -m "not integration"

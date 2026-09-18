@@ -22,3 +22,7 @@ dist/
 # Until the strata packages are on an index a lock here would pin wheels
 # built beside the checkout, so none is kept; the strata workspace keeps one.
 uv.lock
+
+# Planning and handoff documents: kept locally, never published
+/TODO.md
+/docs/pick-up-here.md

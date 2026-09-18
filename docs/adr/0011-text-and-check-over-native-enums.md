@@ -25,8 +25,7 @@ it, pass the **bare** constraint name: `MetaData`'s naming convention formats it
 as `ck_%(table_name)s_%(constraint_name)s`, so passing the full name asks to drop
 one that was never created.
 
-Both of those cost time the first time. They are recorded here and in `TODO.md`
-because the trade is still right — but only if the cost is known rather than
+Both of those cost time the first time. They are recorded here because the trade is still right — but only if the cost is known rather than
 rediscovered.
 
 ## Consequences
