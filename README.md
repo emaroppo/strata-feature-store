@@ -62,14 +62,14 @@ Requires Docker and [uv](https://docs.astral.sh/uv/).
 ./scripts/dev-up.sh          # postgres + a throwaway Garage, bootstrapped
 cp config.example.toml config.toml
 cp .env.example .env         # paste the credentials dev-up.sh printed
-uv run feature-store init-db # migrate the catalog to head
+uv run strata-feature-store init-db   # migrate the catalog to head
 uv run pytest -q             # 336 passing, against the real stack
 ```
 
 The test run is the quickest proof the stack is up: it creates a scratch
 database, migrates it the way production is migrated, and exercises ingest,
 standardisation and as-of composition against a live bucket. `uv run
-feature-store --help` lists the commands from there.
+strata-feature-store --help` lists the commands from there.
 
 The stack in `docker-compose.yml` is for development and tests only — the test
 suite creates and wipes buckets, so it must never point at a real instance.
