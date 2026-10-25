@@ -1,23 +1,30 @@
-"""Catalog writes. Every one of them takes a :class:`~strata.feature_store.store.runs.Run`.
+"""Catalog writes, each taking a :class:`~strata.feature_store.store.runs.Run`, and reads.
 
-That first parameter is invariant 4. A ``Run`` cannot be constructed directly —
-only :func:`strata.feature_store.store.runs.run` yields one, and it has already inserted
-the run row before it does. So there is no way to write a catalog row without
-lineage, and none of these functions has to remember to record it.
-
-Reads live here too, but take a plain connection: reading changes nothing and
-owes no account of itself.
+Only :func:`strata.feature_store.store.runs.run` yields a ``Run``, so no catalog
+row can be written without lineage (invariant 4).
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, datetime
 from typing import Any
 
 import sqlalchemy as sa
 
 from strata.feature_store.store.runs import Run
-from strata.feature_store.store.tables import entity_namespace, release, source
+from strata.feature_store.store.tables import (
+    dataset,
+    dataset_version,
+    entity_list,
+    entity_list_member,
+    entity_list_version,
+    entity_namespace,
+    feature_partition,
+    release,
+    source,
+)
+from strata.feature_store.store.tables import run as run_table
 
 
 class CatalogError(RuntimeError):
@@ -74,16 +81,8 @@ def add_source(
     source_url: str | None = None,
     description: str | None = None,
 ) -> int:
-    """Register a publisher's product.
-
-    The native namespace and the granularity are declared once, here, rather
-    than repeated in every standardisation config. Both are read back at
-    standardise: the first decides whether a crosswalk is required, the second
-    is what event times are checked against.
-    """
+    """Register a publisher's product; refuses a known name or an unregistered namespace."""
     with run.transaction() as connection:
-        # Name first: when the source already exists, saying so is more use than
-        # a complaint about a namespace the caller was never going to reach.
         existing = get_source(connection, name)
         if existing is not None:
             raise CatalogError(
@@ -146,17 +145,13 @@ def add_release(
     retrieved_at: datetime | None = None,
     meta: dict[str, Any] | None = None,
 ) -> int:
-    """Record a downloaded file.
+    """Record a downloaded file whose bytes are already in the store and verified (invariant 3).
 
-    Called only after the bytes are in the store and verified, which is
-    invariant 3 — parquet first, verify, then the catalog row. A crash before
-    this point leaves an orphan object; a crash after it leaves nothing wrong.
+    Returns the existing id when the same bytes are already registered under this source.
     """
     with run.transaction() as connection:
         existing = get_release(connection, sha256, source_id=source_id)
         if existing is not None:
-            # Same bytes, same product: this file is already here. Re-registering
-            # it is a no-op, and the run still records that it was attempted.
             return existing["id"]
 
         release_id = connection.execute(
@@ -191,7 +186,7 @@ def get_release(
 
 
 def find_release(connection: sa.Connection, prefix: str) -> dict[str, Any] | None:
-    """Look a release up by a digest prefix, so a human can type eight characters."""
+    """Look a release up by a digest prefix; refuses a prefix matching more than one digest."""
     rows = (
         connection.execute(sa.select(release).where(release.c.sha256.like(f"{prefix}%")))
         .mappings()
@@ -204,9 +199,7 @@ def find_release(connection: sa.Connection, prefix: str) -> dict[str, Any] | Non
         raise CatalogError(
             f"{prefix!r} matches {len(digests)} distinct digests; give more characters"
         )
-    # One digest across several rows means two sources registered identical
-    # bytes. They resolve to the same object, so fetching is unambiguous even
-    # though the catalog rows are not.
+    # Several rows under one digest share one object, so fetching is unambiguous.
     return dict(rows[0])
 
 
@@ -224,27 +217,11 @@ def list_releases(connection: sa.Connection, source_id: int | None = None) -> li
 def live_partitions(
     connection: sa.Connection, feature_group_id: int | None = None
 ) -> list[dict[str, Any]]:
-    """The parquet objects a reader is allowed to see.
+    """The parquet objects a reader may see: written by a finished run and not superseded.
 
-    Two filters, and both matter:
-
-    **The creating run must have finished.** A standardise commits each part as
-    it writes it, so a run still in progress — or one that died at the last
-    batch — has real, complete parquet files in the store that describe only
-    part of a group. Reading them would return a plausible answer computed from
-    a quarter of the data, with nothing indicating that. Visibility therefore
-    follows the run's status rather than a transaction boundary.
-
-    **A superseded partition is not live.** Re-standardising a release under a
-    corrected config supersedes the old part rather than deleting it, so old
-    pins keep resolving while new reads do not see both.
-
-    This is also invariant 7: the file list comes from here, never from listing
-    a prefix, so the orphans a failed run leaves behind stay invisible.
+    The file list comes from here, never from listing a prefix (invariant 7), so
+    a partial run's parts stay invisible.
     """
-    from strata.feature_store.store.tables import feature_partition
-    from strata.feature_store.store.tables import run as run_table
-
     query = (
         sa.select(feature_partition)
         .join(run_table, run_table.c.id == feature_partition.c.created_by_run_id)
@@ -260,6 +237,46 @@ def live_partitions(
 
 
 # --------------------------------------------------------------------------
+# dataset versions
+
+
+def version_row(
+    connection: sa.Connection,
+    name: str,
+    version: int | None,
+    *,
+    error: Callable[[list[int]], Exception],
+) -> dict[str, Any]:
+    """One ``dataset_version`` row by dataset name; ``version=None`` means the newest.
+
+    When nothing matches, raises ``error(available)`` with the version numbers the
+    dataset does have, so each caller words its own refusal.
+    """
+    query = (
+        sa.select(dataset_version)
+        .join(dataset, dataset.c.id == dataset_version.c.dataset_id)
+        .where(dataset.c.name == name)
+        .order_by(dataset_version.c.version_num.desc())
+    )
+    if version is not None:
+        query = query.where(dataset_version.c.version_num == version)
+    row = connection.execute(query).mappings().first()
+    if row is None:
+        available = (
+            connection.execute(
+                sa.select(dataset_version.c.version_num)
+                .join(dataset, dataset.c.id == dataset_version.c.dataset_id)
+                .where(dataset.c.name == name)
+                .order_by(dataset_version.c.version_num)
+            )
+            .scalars()
+            .all()
+        )
+        raise error(list(available))
+    return dict(row)
+
+
+# --------------------------------------------------------------------------
 # entity lists
 
 
@@ -271,22 +288,11 @@ def add_entity_list(
     members: list[str],
     description: str | None = None,
 ) -> tuple[int, int]:
-    """Freeze a named set of entity ids as a new version.
+    """Freeze a named set of entity ids as a new version; refuses an empty list.
 
-    A bounded exception to holding no entity knowledge: a list of ids is a
-    *selection*, not knowledge about entities. No aliases, no hierarchy, no
-    succession, no attributes, and nothing resolves through it at runtime.
-
-    Versioned because a spec pins one. Redefining "the entities in region R"
-    would otherwise rewrite what an earlier composition meant, which is the same
-    failure that makes crosswalks pinned rather than resolved.
+    A list is a selection, not knowledge about entities, and is versioned
+    because a composition pins it.
     """
-    from strata.feature_store.store.tables import (
-        entity_list,
-        entity_list_member,
-        entity_list_version,
-    )
-
     unique = sorted(set(members))
     if not unique:
         raise CatalogError("an entity list with no members selects nothing")
@@ -326,40 +332,3 @@ def add_entity_list(
         )
     run.wrote("entity_list_version", version_id, role="entity_list")
     return version_id, version_num
-
-
-def list_entity_lists(connection: sa.Connection) -> list[dict[str, Any]]:
-    from strata.feature_store.store.tables import (
-        entity_list,
-        entity_list_member,
-        entity_list_version,
-    )
-
-    members = (
-        sa.select(
-            entity_list_version.c.entity_list_id.label("list_id"),
-            entity_list_version.c.version_num,
-            sa.func.count(entity_list_member.c.entity_id).label("members"),
-        )
-        .join(
-            entity_list_member,
-            entity_list_member.c.entity_list_version_id == entity_list_version.c.id,
-        )
-        .group_by(entity_list_version.c.entity_list_id, entity_list_version.c.version_num)
-        .subquery()
-    )
-    rows = (
-        connection.execute(
-            sa.select(
-                entity_list.c.name,
-                entity_list.c.entity_namespace,
-                members.c.version_num,
-                members.c.members,
-            )
-            .join(members, members.c.list_id == entity_list.c.id)
-            .order_by(entity_list.c.name, members.c.version_num)
-        )
-        .mappings()
-        .all()
-    )
-    return [dict(r) for r in rows]

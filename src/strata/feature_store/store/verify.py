@@ -1,21 +1,7 @@
-"""Reconciling what the catalog claims against what the store holds.
+"""Reconciling what the catalog claims against what the store holds, and undoing runs.
 
-Invariant 3 writes bytes first and the catalog row second, so a crash leaves an
-orphan object and never a row pointing at nothing. That is the recoverable
-direction, but only if something actually recovers it — an orphan nobody finds
-is just a slow leak, and "findable in principle" is how a bucket ends up with
-years of debris.
-
-Three checks, in increasing cost:
-
-**shallow**  every catalog row's object is present, and the right size.
-**deep**     every object's bytes hash to what the row claims, and every feature
-             name in the parquet has a row in the registry.
-**orphans**  every object under the store's prefixes is pointed at by a row.
-
-The registry check runs one way only. A registry row without facts is the
-ordinary state of a feature nobody has published yet; a fact whose name has no
-row is a vocabulary that has lost track of its own data.
+Shallow checks presence and size, deep checks digests and the feature registry,
+orphans checks that every object is pointed at by a row.
 """
 
 from __future__ import annotations
@@ -28,7 +14,7 @@ from typing import Any
 import sqlalchemy as sa
 
 from strata.feature_store.spec.canonical import hash_file
-from strata.feature_store.store import duck, objects
+from strata.feature_store.store import catalog, duck, objects
 from strata.feature_store.store.config import Settings
 from strata.feature_store.store.tables import (
     dataset_version,
@@ -36,6 +22,8 @@ from strata.feature_store.store.tables import (
     feature_group,
     feature_partition,
     release,
+    run_input,
+    run_output,
 )
 from strata.feature_store.store.tables import run as run_table
 
@@ -50,8 +38,7 @@ class Findings:
     orphans: list[str] = field(default_factory=list)
     registry_drift: list[str] = field(default_factory=list)
     checked: int = 0
-    #: Objects belonging to runs that never finished. Not orphans — a run may
-    #: still be going — but not readable either, and worth naming separately.
+    #: Objects of runs that never finished: not orphans, not readable either.
     unfinished: list[str] = field(default_factory=list)
 
     @property
@@ -73,20 +60,8 @@ class Findings:
 def _catalogued(connection: sa.Connection, run_id: int | None) -> list[dict[str, Any]]:
     """Every object the catalog claims exists.
 
-    **Every table that names an object key has to appear here**, and the reason
-    is not tidiness. Anything absent from this list is invisible to the
-    consistency checks *and* is reported as an orphan by ``--orphans``, because
-    an orphan is defined as a key nothing in this list points at. So a missing
-    table does not merely go unchecked: it gets deleted by ``--prune-orphans``.
-
-    That is not hypothetical. ``dataset_version.object_prefix`` was missing from
-    the first version of this function, which meant every crosswalk parquet and
-    every materialised composition was classified as debris. Pruning removed
-    three of them, and the store then failed to resolve a crosswalk it still had
-    a catalogued, pinned, immutable version row for.
-
-    Adding a table that stores objects and forgetting this function is
-    therefore a way to lose data, not a way to lose coverage.
+    Every table that names an object key must appear here: a key absent from
+    this list is an orphan to ``--prune-orphans``, so omitting a table loses data.
     """
     partitions = sa.select(
         feature_partition.c.object_key.label("key"),
@@ -106,8 +81,6 @@ def _catalogued(connection: sa.Connection, run_id: int | None) -> list[dict[str,
         .join(run_table, run_table.c.id == release.c.created_by_run_id)
         .where(release.c.pruned_at.is_(None))
     )
-    # Crosswalk and composed parquet, addressed by dataset_version rather than
-    # by a partition or a release.
     versions = (
         sa.select(
             dataset_version.c.object_prefix.label("key"),
@@ -162,8 +135,7 @@ def verify(
                 f"{row['key']} ({head['ContentLength']} bytes, catalog says {row['size']})"
             )
         if deep and row["kind"] != "dataset_version":
-            # A dataset_version's content_hash identifies the *spec*, not the
-            # bytes, so re-hashing the file would compare two different things.
+            # A dataset_version's content_hash is over the spec, not the bytes.
             with tempfile.TemporaryDirectory() as work:
                 local = Path(work) / "object"
                 s3.download_file(Bucket=bucket, Key=row["key"], Filename=str(local))
@@ -187,20 +159,9 @@ def verify(
 def _registry_drift(engine: sa.Engine, settings: Settings, *, run_id: int | None) -> list[str]:
     """Feature names the parquet holds that the registry does not know about.
 
-    Only that direction is drift. The registry is a *vocabulary*: it records
-    that a feature exists, which standardise writes from the source's schema
-    whether or not this release carried any non-null values for it. A feature
-    with a row and no facts is therefore the ordinary state of a
-    not-yet-published indicator, and reporting it would flag correct behaviour
-    as a fault — the unmapped sibling of a wide panel is almost entirely made
-    of them.
-
-    A fact whose name has no row is the real problem: the vocabulary is
-    incomplete, so nothing can discover the feature, and a spec naming it is
-    refused even though the data is there.
+    One direction only: a registry row without facts is the ordinary state of an
+    unpublished feature, not drift.
     """
-    from strata.feature_store.store import catalog
-
     drift: list[str] = []
     with engine.connect() as connection:
         groups = (
@@ -248,19 +209,11 @@ class UndoError(RuntimeError):
 
 
 def undo(engine: sa.Engine, settings: Settings, run_id: int, *, s3=None) -> dict[str, Any]:
-    """Delete a run's outputs and mark it rolled back.
+    """Delete a run's outputs and mark it rolled back; the run row itself stays.
 
-    The run row itself stays. That it happened is a fact, and a catalog that
-    erases its own history is exactly the fiction lineage exists to prevent.
-
-    **Refuses when anything depends on the outputs** — a downstream run that
-    read them, or a frozen version whose watermark covers them — and names what
-    does, rather than offering a force flag. The alternative to refusing is a
-    dangling pin, and a frozen version that no longer resolves is worse than a
-    partition that will not delete.
+    Refuses, naming the dependant, when a later run read the outputs or the run
+    froze a dataset version. See ``docs/adr/0008``.
     """
-    from strata.feature_store.store.tables import dataset_version, run_input, run_output
-
     s3 = s3 or objects.client(settings.storage)
     bucket = settings.storage.bucket
 
@@ -341,10 +294,7 @@ def undo(engine: sa.Engine, settings: Settings, run_id: int, *, s3=None) -> dict
             else []
         )
 
-    # Catalog first here, deliberately inverting the write order. A crash
-    # between the two leaves an orphan object, which verify finds and which is
-    # the same recoverable state a failed write leaves; the other order would
-    # leave a row pointing at bytes already deleted.
+    # Catalog first, inverting the write order: a crash here leaves an orphan, never a dangling row.
     with engine.begin() as connection:
         if partition_ids:
             connection.execute(
@@ -369,14 +319,7 @@ def undo(engine: sa.Engine, settings: Settings, run_id: int, *, s3=None) -> dict
 
 
 def prune_release(engine: sa.Engine, settings: Settings, digest_prefix: str, *, s3=None) -> dict:
-    """Drop a release's bytes, keeping the row as a tombstone.
-
-    Never automatic, never on a schedule, never a side effect. A store that
-    silently discards its own sources cannot answer why a number changed, and
-    re-standardising from the original bytes is the whole reason they are kept.
-    """
-    from strata.feature_store.store import catalog
-
+    """Drop a release's bytes, keeping the row as a tombstone; never called automatically."""
     s3 = s3 or objects.client(settings.storage)
     with engine.connect() as connection:
         found = catalog.find_release(connection, digest_prefix)
@@ -400,28 +343,11 @@ def prune_orphans(
     s3=None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Delete objects no catalog row points at.
+    """Delete exactly the objects :func:`verify` lists as orphans.
 
-    Deletes **exactly** what :func:`verify` just listed and nothing inferred
-    from it, because the whole risk here is deleting something live that merely
-    looked orphaned.
-
-    Two refusals, and the second is the one that matters:
-
-    **The catalog and store must otherwise agree.** An orphan list computed
-    while rows are missing or digests are wrong is a list computed against a
-    store nobody understands yet, and the right response to that is to look, not
-    to delete.
-
-    **No run may be in progress.** Invariant 3 uploads bytes before writing the
-    row, so a part that has landed and not yet been recorded is indistinguishable
-    from an orphan by inspection. Pruning during a standardise would delete the
-    work it is in the middle of doing. A `running` run is the only signal that
-    window is open, so it is a hard stop rather than a warning.
-
-    Objects from `failed` and `rolled_back` runs *are* genuinely orphaned and are
-    removed: those runs are over, and what they left behind is what this exists
-    to clear.
+    Refuses while any run is ``running``, because invariant 3 makes an uploaded
+    but unrecorded part look like an orphan, and refuses when the catalog and
+    store otherwise disagree.
     """
     s3 = s3 or objects.client(settings.storage)
 

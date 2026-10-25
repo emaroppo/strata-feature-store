@@ -1,16 +1,7 @@
 """ISO-8601 durations, restricted to the calendar parts.
 
-Lags and staleness bounds are written as ``P18M``, ``P36M``, ``P2M`` rather
-than as a number whose unit lives in a neighbouring field. One string carries
-both, and it is the same string a human reads in a config and a reviewer reads
-in a diff.
-
-**Months and days are kept apart and never reconciled.** Eighteen months is not
-548 days: added to different dates it lands on different intervals, and a lag
-rule that drifts by a day or two across a decade of event times is a lag rule
-that produces wrong knowledge_times at the boundaries. So a duration carries
-both fields and applies months first, and no code here converts one into the
-other.
+Months and days are kept apart and never converted into one another, because a
+month is not a fixed number of days and folding them would drift at boundaries.
 """
 
 from __future__ import annotations
@@ -43,11 +34,9 @@ class Duration:
 
 
 def parse_duration(text: str) -> Duration:
-    """Parse an ISO-8601 duration such as ``P18M`` or ``P2Y6M``.
+    """Parse an ISO-8601 calendar duration such as ``P18M``.
 
-    Time components (``PT1H``) are rejected rather than ignored. Nothing in
-    this domain has a sub-day lag, and silently dropping a component the author
-    meant is worse than refusing it.
+    Refuses time components such as ``PT1H``.
     """
     if not isinstance(text, str):
         raise TypeError(f"duration must be a string, not {type(text).__name__}")
@@ -78,16 +67,7 @@ def format_duration(duration: Duration) -> str:
 
 
 def add_duration(start: date, duration: Duration) -> date:
-    """Add *duration* to *start*, months first, then days.
-
-    Months-first is the convention every calendar library uses and the one a
-    config author assumes. It matters at month ends: adding one month to
-    31 January gives 28 February, and adding the day afterwards gives 1 March,
-    where the other order would give 3 March.
-
-    Overflowing a short month clamps to its last day rather than spilling into
-    the next one, so ``31 January + P1M`` is 28 February and not 3 March.
-    """
+    """Add *duration* to *start*: months first, clamped to the month's last day, then days."""
     month_index = start.month - 1 + duration.months
     year = start.year + month_index // 12
     month = month_index % 12 + 1

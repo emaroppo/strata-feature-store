@@ -1,23 +1,7 @@
-"""The catalog: what exists, and where it came from.
+"""The catalog: what exists and where it came from, in SQLAlchemy Core, never a value.
 
-**No feature values live here.** Postgres holds descriptions, pointers and
-lineage; the values are in parquet in the bucket. That division is what keeps
-this database in the low megabytes after bulk-ingesting every indicator
-collection on offer, and it is why there is no table here with a value column.
-
-Core rather than the ORM. These are tables, and what a query returns is a row
-of data — wrapping them in instances buys nothing when nothing has behaviour.
-
-Two conventions worth knowing before reading:
-
-**Additive only.** Nothing is deleted and nothing is renamed. A feature that
-stops being published gets a ``deprecated_at``; a partition that is corrected
-gets a ``superseded_by_run_id``; a feature whose type changes is a new feature
-with a new name. Rewriting the past is how a catalog becomes fiction.
-
-**Enum-like columns are TEXT with a CHECK**, not native Postgres enums.
-Widening a CHECK is a cheap migration; widening a native enum is a transactional
-one, and these vocabularies are expected to widen.
+Additive only: a feature is deprecated, a partition superseded, never deleted or
+renamed. Enum-like columns are TEXT with a CHECK, see ``docs/adr/0011``.
 """
 
 from __future__ import annotations
@@ -39,9 +23,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
-# Set from the very first migration. Retrofitting a naming convention means
-# renaming every constraint Postgres already invented a name for, so it is
-# cheaper to be right once than to be sorry across a schema.
+# Set from the first migration; retrofitting would mean renaming every constraint. docs/adr/0011
 metadata = MetaData(
     naming_convention={
         "ix": "ix_%(column_0_label)s",
@@ -53,8 +35,6 @@ metadata = MetaData(
 )
 
 SOURCE_KINDS = ("panel", "crosswalk")
-# A crosswalk is a frozen, version-pinned collection like any other, so it lives
-# here rather than in a table of its own.
 DATASET_KINDS = ("composed", "crosswalk")
 RESOLUTION_MODES = ("query", "materialized")
 TIME_BASES = ("ingest_fallback", "modeled_lag", "file_release", "publisher_timestamp")
@@ -80,9 +60,7 @@ entity_namespace = Table(
     metadata,
     Column("name", String(64), primary_key=True),
     Column("description", Text),
-    # Where the vocabulary is defined, when it is public. Preferring published
-    # vocabularies over minting ids that then need maintaining is a rule; this
-    # column is what makes following it checkable.
+    # Where a public vocabulary is defined.
     Column("external_ref", Text),
     Column("created_at", DateTime, nullable=False, server_default=func.now()),
     comment="Registered entity vocabularies. The join key only - no entity knowledge.",
@@ -95,15 +73,9 @@ source = Table(
     Column("id", Integer, primary_key=True),
     Column("name", String(128), nullable=False, unique=True),
     Column("kind", String(16), nullable=False, server_default="panel"),
-    # What the publisher publishes in, which is not necessarily what we store
-    # in. Standardisation converts to the canonical namespace and the stored
-    # parquet is always canonical; this records where it started so the
-    # crosswalk requirement can be enforced at ingest.
+    # What the publisher publishes in; the stored parquet is canonical. docs/adr/0005
     Column("native_namespace", ForeignKey("entity_namespace.name"), nullable=False),
-    # How the publisher emits observations. Read at standardise to check that
-    # event times actually land on the declared boundary: an annual source whose
-    # dates are not year ends means the anchor is wrong, and a wrong anchor
-    # shifts every derived knowledge_time by up to a year.
+    # Checked against event times at standardise (invariant 11). docs/adr/0001
     Column("granularity", String(16), nullable=False),
     Column("licence", Text),
     Column("source_url", Text),
@@ -120,32 +92,20 @@ release = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("source_id", ForeignKey("source.id"), nullable=False),
-    # Content-addressed. Publishers reuse filenames across vintages constantly;
-    # keying on the name would let September's download silently overwrite
-    # April's, after which no earlier standardisation is reproducible and
-    # nothing records that it happened.
-    #
-    # Unique per source rather than globally: the bytes dedupe to one object in
-    # the store either way, but a release is a fact about a *product*, and two
-    # publishers distributing an identical file is unusual rather than illegal.
-    # A global constraint would refuse the second one with an error about
-    # ownership, which is a strange thing for a store to have an opinion about.
+    # Content-addressed, and unique per source rather than globally: a release
+    # is a fact about a product, and two products may ship identical bytes.
     Column("sha256", String(64), nullable=False),
     Column("object_key", Text, nullable=False),
     Column("size_bytes", Integer, nullable=False),
     Column("original_filename", Text, nullable=False),
     Column("media_type", String(128)),
     Column("source_url", Text),
-    # The publisher's vintage, and the usual origin of a file_release
-    # knowledge_time. Deliberately separate from retrieved_at: stamping a 2024
-    # archive with a 2026 download date makes every as-of query before 2026
-    # return nothing, which reads as missing data rather than as a mistake.
+    # The publisher's vintage, never the download date. docs/adr/0003
     Column("released_at", Date),
     Column("retrieved_at", DateTime),
     Column("ingested_at", DateTime, nullable=False, server_default=func.now()),
     Column("created_by_run_id", ForeignKey("run.id"), nullable=False),
-    # Set when the bytes are pruned. The row and the hash stay as a tombstone,
-    # so lineage still resolves and the file is still identifiable.
+    # Set when the bytes are pruned; the row stays as a tombstone so lineage resolves.
     Column("pruned_at", DateTime),
     Column("meta", JSONB),
     UniqueConstraint("source_id", "sha256"),
@@ -161,30 +121,16 @@ feature_group = Table(
     Column("id", Integer, primary_key=True),
     Column("name", String(128), nullable=False, unique=True),
     Column("source_id", ForeignKey("source.id"), nullable=False),
-    # Always the canonical namespace for a group holding mapped entities, and
-    # the source's native one for the sibling group holding the entities that
-    # had no canonical id. The second is not joinable to the first without a
-    # crosswalk, which is the namespace guard doing its job.
+    # Canonical for mapped entities, the source's native one for the unmapped sibling. docs/adr/0006
     Column("entity_namespace", ForeignKey("entity_namespace.name"), nullable=False),
-    # The unit of uniform knowledge-time semantics: every sample in a group
-    # shares one basis and one lag. A revised indicator and an unrevised one
-    # belong to different groups even when they arrive in the same file.
+    # Every sample in a group shares one basis and one lag. docs/adr/0003
     Column("time_basis", String(32), nullable=False),
-    # ISO-8601, e.g. 'P18M'. Promoted out of a JSON blob because it is read at
-    # query time by the COALESCE that derives knowledge_time, so it has to be
-    # typed and constrained rather than fished out.
+    # ISO-8601, e.g. 'P18M'; a typed column because the read-time COALESCE uses it.
     Column("declared_lag", String(16)),
-    # Measure the lag from the end of this period rather than from the raw event
-    # date. A publisher releasing annually publishes January and December of one
-    # year in the same file; lagging each event date separately would claim they
-    # became knowable a year apart, which is false in a way that silently shifts
-    # an entire backtest.
+    # Measure the lag from the end of this period rather than the raw event date.
     Column("lag_anchor_period", String(16)),
     Column("period_anchor", String(8), nullable=False, server_default="end"),
-    # Whether this publisher's nulls withdraw a value or merely mean "not
-    # reported this cycle". Opposite meanings that the format cannot tell
-    # apart, so the group declares which convention applies. Resolved at read,
-    # so changing the ruling is a metadata update rather than a rebuild.
+    # Whether a null withdraws a value; resolved at read. docs/adr/0009
     Column("retraction_policy", String(8), nullable=False, server_default="honour"),
     Column("storage_prefix", Text, nullable=False),
     Column("partition_spec", JSONB, nullable=False, server_default='{"by": []}'),
@@ -194,8 +140,7 @@ feature_group = Table(
     _tuple_check("time_basis", TIME_BASES, "time_basis"),
     CheckConstraint("period_anchor IN ('start', 'end')", name="period_anchor"),
     CheckConstraint("retraction_policy IN ('honour', 'ignore')", name="retraction_policy"),
-    # A lag is meaningful for exactly one basis. Declared anywhere else it would
-    # be silently ignored; missing here there would be nothing to derive.
+    # A lag is meaningful for exactly one basis.
     CheckConstraint(
         "(time_basis = 'modeled_lag') = (declared_lag IS NOT NULL)",
         name="lag_iff_modeled",
@@ -210,19 +155,11 @@ feature = Table(
     Column("id", Integer, primary_key=True),
     Column("feature_group_id", ForeignKey("feature_group.id"), nullable=False),
     Column("name", String(255), nullable=False),
-    # 'num' or 'str', and one name is one dtype forever. A name that arrives
-    # numeric in one release and as a code in the next is rejected at
-    # standardise, because the alternative is every consumer branching on which
-    # value column happens to be populated.
+    # 'num' or 'str'; one name is one dtype forever, enforced at standardise.
     Column("dtype", String(8), nullable=False),
     Column("unit", Text),
     Column("description", Text),
-    # What the name says about the feature: its base quantity, the scale it is
-    # expressed on, which summary statistic it is. Read out of the name by a
-    # declared suffix grammar, so the store knows nothing about any particular
-    # publisher. With thousands of names in a group this is what makes "the
-    # point estimates" selectable without listing them all or matching suffixes
-    # by hand -- and two-part suffixes make hand-matching wrong.
+    # Base quantity, scale and statistic, read out of the name by a declared suffix grammar.
     Column("meta", JSONB),
     Column("created_by_run_id", ForeignKey("run.id"), nullable=False),
     Column("deprecated_at", DateTime),
@@ -318,10 +255,7 @@ dataset_version = Table(
     Column("resolution_mode", String(16), nullable=False),
     Column("spec", JSONB, nullable=False),
     Column("content_hash", String(64), nullable=False),
-    # A pinned as-of cutoff alone does NOT make a version reproducible: a fact
-    # ingested later, whose knowledge_time is before the cutoff, changes the
-    # answer - which is exactly what a bitemporal store exists to represent. So
-    # the other time axis is pinned too, and reads warn when it withholds.
+    # The second pinned time axis. docs/adr/0007
     Column("ingest_watermark", DateTime, nullable=False),
     Column("object_prefix", Text),
     Column("frozen_at", DateTime, nullable=False, server_default=func.now()),
@@ -345,15 +279,12 @@ run = Table(
     Column("config_hash", String(64), nullable=False),
     Column("code_git_sha", String(40)),
     Column("code_dirty", Integer),
-    # The *effective* config, after overrides and with defaults materialised -
-    # which is also what config_hash is over. Hashing the file on disk would
-    # make two runs with different overrides look identical.
+    # The effective config after overrides, which is what config_hash is over.
     Column("params", JSONB, nullable=False),
     Column("env", JSONB, nullable=False),
     Column("status", String(16), nullable=False, server_default="running"),
     Column("manifest_key", Text),
-    # The high-water mark this run's outputs reached. Invariant 1 compares it
-    # against the same column on the runs that produced its inputs.
+    # The high-water mark this run's outputs reached, for invariant 1.
     Column("max_knowledge_time", DateTime),
     Column("started_at", DateTime, nullable=False, server_default=func.now()),
     Column("finished_at", DateTime),
@@ -365,12 +296,7 @@ run = Table(
 
 
 def _lineage_table(name: str, comment: str) -> Table:
-    """``run_input`` and ``run_output`` are the same shape and stay that way.
-
-    ``ref_type`` is a checked string rather than a polymorphic foreign key.
-    Four target tables through one column is where the ORM stops helping and a
-    ``verify`` pass starts doing more good than a constraint would.
-    """
+    """``run_input`` and ``run_output`` share one shape; ``ref_type`` is a checked string."""
     return Table(
         name,
         metadata,

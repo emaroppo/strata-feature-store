@@ -1,19 +1,8 @@
-"""The composition spec: what to retrieve, and as of when.
+"""The composition spec: a spine, a set of features, and the cutoff each is read at.
 
-A composition names a spine — entities crossed with timestamps — and a set of
-features, and resolves each feature to what was knowable at a cutoff derived
-from the spine row. That resolution is the whole point of the store, and this
-model is the artifact that records it.
-
-**It retrieves; it does not compute.** Carrying a value forward to a spine row,
-nulling one that has gone stale, and pivoting to wide are all resolution: they
-answer *what was the value*, without producing a value that was not there.
-Anything with a coefficient in it belongs to the post-processing repository.
-
-**The spec is hashed, so it is the identity of a frozen version.** Two
-compositions that differ anywhere differ in their hash, and one that does not
-differ resolves to the same data forever — which is what makes a result
-reproducible rather than merely repeatable.
+A composition retrieves and never computes; anything with a coefficient in it
+belongs to post-processing. Its hash is the identity of a frozen version.
+See ``docs/adr/0007``.
 """
 
 from __future__ import annotations
@@ -36,22 +25,16 @@ class Strict(BaseModel):
 
 
 class EntityList(Strict):
-    """Where the spine's entities come from.
+    """Where the spine's entities come from; exactly one source, each pinned by hash or watermark.
 
-    Exactly one of these. All three are reproducible, but by different means: a
-    literal list is fixed by the spec's own hash, while the other two are fixed
-    by the version's pinned ``ingest_watermark`` — the entity set cannot move
-    under a frozen version for the same reason the values cannot.
+    See ``docs/adr/0007``.
     """
 
-    #: Named outright. Not called `list`: a field of that name shadows the
-    #: builtin inside the class body, and every later annotation using
-    #: `list[...]` then fails to resolve.
+    #: Named outright. Not called `list`: that would shadow the builtin in later annotations.
     ids: list[str] | None = None
     #: Every entity present in a feature group.
     from_group: str | None = None
-    #: A stored, versioned named list, so "the entities in region R" is defined
-    #: once and reused rather than pasted into every spec.
+    #: A stored, versioned named list, pinned by `version`.
     name: str | None = None
     version: int | None = None
 
@@ -115,13 +98,9 @@ class Spine(Strict):
 
 
 class AsOfException(Strict):
-    """One feature that must be read at a different cutoff, and why.
+    """One feature read at a different cutoff.
 
-    The reason is required and is part of the hashed spec. A calendar fact for
-    month T is published in advance of T, so reading it at the lagged cutoff
-    would withhold something genuinely available — but a rule like that written
-    in a code comment is a rule nobody can review. Here it is unrepresentable
-    without saying why.
+    The reason is required and is part of the hashed spec.
     """
 
     feature: str
@@ -180,8 +159,6 @@ class FeatureRef(Strict):
     #: What to call it in the output. Defaults to the feature's own name.
     alias: str | None = None
     #: Beyond this age a value resolves to null rather than carrying forward.
-    #: Without it, a figure from 2019 and one from last week are indistinguishable
-    #: in the output.
     max_age: str | None = None
 
     @model_validator(mode="after")
@@ -196,14 +173,13 @@ class FeatureRef(Strict):
 
 
 class Output(Strict):
-    #: Wide is a presentation of the same samples, never a storage layout.
+    #: Wide is a presentation, never a storage layout; see ``docs/adr/0002``.
     orientation: Literal["long", "wide"] = "long"
-    #: Carry the resolved knowledge_time, so staleness is visible at all.
+    #: Carry the resolved knowledge_time.
     include_knowledge_time: bool = True
-    #: And its distance from the cutoff, which is what a reader actually filters on.
+    #: Carry its distance from the cutoff.
     include_age_days: bool = True
-    #: The cutoff itself, rendered as a column. This is `data_through`: derived
-    #: from the as-of policy, never stored.
+    #: Carry the cutoff itself as `data_through`, derived from the as-of policy.
     include_data_through: bool = True
 
 

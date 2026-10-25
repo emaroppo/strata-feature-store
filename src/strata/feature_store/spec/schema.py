@@ -1,24 +1,12 @@
-"""The long-format schema, defined once.
+"""The long-format schema: every feature parquet has these seven columns and no others.
 
-Every feature parquet in the store has these seven columns and no others.
-Sameness is the point: combining two sources is a ``UNION ALL`` rather than a
-join, adding a feature is an append rather than a migration across every
-registered file, and a reader never has to ask what shape a file is in.
-
-**Why long rather than wide.** ``knowledge_time`` attaches to a fact, not to a
-row. A wide layout forces every column in a row to share one revision cadence,
-and that is simply false — a GDP figure is revised for years, a population
-count is not. Wide exists here only as an output orientation, produced by
-pivoting at freeze time, and is never a registered storage layout.
-
-The dtypes are named rather than constructed, so this module stays free of
-``pyarrow``. ``strata.feature_store.store.parquet`` turns them into a real schema.
+Dtypes are named, not constructed, so this module stays free of ``pyarrow``.
+See ``docs/adr/0002``.
 """
 
 from typing import Final
 
-#: Column order is fixed. Files are written in this order so that a bare
-#: parquet read without the catalog still lines up.
+#: Column order is fixed, so a bare parquet read without the catalog still lines up.
 ENTITY_ID: Final = "entity_id"
 EVENT_TIME: Final = "event_time"
 KNOWLEDGE_TIME: Final = "knowledge_time"
@@ -37,9 +25,8 @@ COLUMNS: Final[tuple[str, ...]] = (
     VALUE_STR,
 )
 
-#: Logical types, resolved to physical ones by the store. ``knowledge_time`` is
-#: nullable because a ``modeled_lag`` group leaves it null on first load and
-#: derives it at read; see :mod:`strata.feature_store.spec.timebasis`.
+#: Logical types, resolved to physical ones by the store; ``knowledge_time`` is
+#: nullable for ``modeled_lag`` groups, see ``docs/adr/0003``.
 DTYPES: Final[dict[str, str]] = {
     ENTITY_ID: "string",
     EVENT_TIME: "date32",
@@ -52,39 +39,24 @@ DTYPES: Final[dict[str, str]] = {
 
 NULLABLE: Final[frozenset[str]] = frozenset({KNOWLEDGE_TIME, VALUE_NUM, VALUE_STR})
 
-#: Dictionary-encoded on write. Both repeat heavily within a file — a group
-#: holds a few hundred entity ids and up to a few thousand feature names across
-#: millions of rows.
+#: Dictionary-encoded on write: both repeat heavily within a file.
 DICTIONARY_ENCODED: Final[frozenset[str]] = frozenset({ENTITY_ID, FEATURE_NAME})
 
-#: Sort order applied before writing. Puts ``feature_name`` first so row-group
-#: min/max statistics on it are tight: a query for three indicators then skips
-#: the row groups holding the other nine hundred. Sorting by entity first would
-#: spread every feature across every row group and make the statistics useless.
+#: Sort order before writing; ``feature_name`` first keeps row-group statistics tight.
 SORT_ORDER: Final[tuple[str, ...]] = (FEATURE_NAME, ENTITY_ID, EVENT_TIME)
 
-#: A fact's identity, for deciding whether a release changed a value. Note it
-#: excludes ``knowledge_time``: the whole point of a revision is that the value
-#: for one identity now differs and gains a new knowledge_time.
+#: A fact's identity for diffing releases; excludes ``knowledge_time``, see ``docs/adr/0004``.
 FACT_KEY: Final[tuple[str, ...]] = (ENTITY_ID, EVENT_TIME, FEATURE_NAME)
 
-#: Bumped when the meaning of a column changes. Written into every parquet's
-#: key-value metadata, so a file found without a catalog says how to read it.
+#: Bumped when the meaning of a column changes.
 SCHEMA_VERSION: Final = 1
 
-#: Parquet key-value metadata keys. Prefixed so they cannot collide with a
-#: writer's own.
+#: Prefix for parquet key-value metadata keys, so they cannot collide with a writer's own.
 META_PREFIX: Final = "strata.feature_store."
 
 
 def value_column(dtype: str) -> str:
-    """Which value column a feature of *dtype* is stored in.
-
-    One feature name is one dtype forever. A name that arrives numeric in one
-    release and as a code in the next is rejected at standardise rather than
-    discovered at read, because the alternative is every consumer branching on
-    which column happens to be populated.
-    """
+    """Which value column a feature of *dtype* is stored in; refuses all but ``num`` and ``str``."""
     if dtype == "num":
         return VALUE_NUM
     if dtype == "str":

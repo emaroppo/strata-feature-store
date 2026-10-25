@@ -1,30 +1,15 @@
 """Crosswalks: mapping one entity vocabulary onto another.
 
-A crosswalk is an ordinary source with its own releases. Registering one freezes
-a ``dataset_version`` with ``kind='crosswalk'``, which is the version number a
-standardisation config pins. Pinning matters because entity resolution improves
-over time, and a mapping resolved afresh on every run would silently rewrite
-what an old ingest meant.
-
-**Validated at registration, not at use.** The one-to-one check runs once, when
-the version is created, so a version that exists is a version that is safe.
-Checking at use instead would mean discovering a bad mapping in the middle of a
-long ingest, having already written half of it.
-
-**One-to-one, and the reason is not tidiness.** A source id with two live
-targets turns one fact into two: the row count grows, the numbers stay
-plausible, and nothing reports it. That silent multiplication is the exact
-failure the namespace rule exists to prevent, and permitting it here would
-reintroduce it through the fix. The one legitimate case is succession — a state
-that split, a code reused across a boundary — and succession belongs to a
-knowledge layer that does not exist yet. Until it does, successors are separate
-entities.
+A crosswalk is a source whose registered release becomes a pinned
+``dataset_version`` of ``kind='crosswalk'``, validated one-to-one at registration.
+See ``docs/adr/0005`` and ``docs/adr/0006``.
 """
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass
-from datetime import date
+from pathlib import Path
 from typing import Any
 
 import sqlalchemy as sa
@@ -38,9 +23,7 @@ from strata.feature_store.store.tables import dataset, dataset_version
 
 CROSSWALK_PREFIX = "crosswalks"
 
-#: The five columns a crosswalk parquet holds. Not the seven-column long schema:
-#: a mapping is not a fact about an entity at a time, it is a relation between
-#: two vocabularies over an interval.
+#: The five columns a crosswalk parquet holds; a mapping is a relation over an interval, not a fact.
 COLUMNS = ("source_id", "target_id", "valid_from", "valid_to", "confidence")
 
 
@@ -82,10 +65,10 @@ def register(
     s3=None,
     work_dir: str | None = None,
 ) -> CrosswalkVersion:
-    """Freeze a release of a crosswalk source as a pinned version."""
-    import tempfile
-    from pathlib import Path
+    """Freeze a release of a crosswalk source as a pinned version.
 
+    Refuses an empty, null-bearing or multi-target mapping. See ``docs/adr/0006``.
+    """
     s3 = s3 or objects.client(settings.storage)
     bucket = settings.storage.bucket
 
@@ -223,37 +206,12 @@ def _ensure_dataset(run: Run, name: str) -> int:
 
 def resolve(connection: sa.Connection, name: str, version_num: int) -> dict[str, Any]:
     """The pinned version's row, or an error naming what does exist."""
-    row = (
-        connection.execute(
-            sa.select(dataset_version)
-            .join(dataset, dataset.c.id == dataset_version.c.dataset_id)
-            .where(dataset.c.name == name, dataset_version.c.version_num == version_num)
-        )
-        .mappings()
-        .first()
-    )
-    if row is None:
-        available = (
-            connection.execute(
-                sa.select(dataset_version.c.version_num)
-                .join(dataset, dataset.c.id == dataset_version.c.dataset_id)
-                .where(dataset.c.name == name)
-                .order_by(dataset_version.c.version_num)
-            )
-            .scalars()
-            .all()
-        )
-        raise CrosswalkError(
+    return catalog.version_row(
+        connection,
+        name,
+        version_num,
+        error=lambda available: CrosswalkError(
             f"no crosswalk {name!r} at version {version_num}. "
             f"Available: {available or 'none - is it registered?'}"
-        )
-    return dict(row)
-
-
-def as_of_clause(alias: str, event_time: str) -> str:
-    """The join predicate that keeps a mapping inside its validity interval."""
-    return f"{alias}.valid_from <= {event_time} AND {event_time} < {alias}.valid_to"
-
-
-def default_validity() -> tuple[date, date]:
-    return date(1, 1, 1), date(9999, 12, 31)
+        ),
+    )

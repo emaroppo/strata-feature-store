@@ -1,20 +1,8 @@
 """The standardisation config: how a source file's columns become long-format facts.
 
-This maps columns onto the seven-column schema and **does nothing else**. It
-cannot compute, rescale, impute, aggregate or derive a value. If a config here
-starts wanting an expression language, that is the separate post-processing
-repository asking to exist, and letting it in here would make this a
-transformation engine that happens to store things.
-
-What it *may* do is decide what a number means — which column is the entity,
-which is the time, what a feature is called, when the value became knowable.
-Those are declarations, not computations, and they are exactly what has to be
-written down rather than inferred.
-
-Everything is overridable from the command line, and the hash that identifies a
-run is taken over the effective config *after* overrides. Hashing the file on
-disk would make two runs of one release under different release dates look
-identical.
+It declares what a column means and never computes a value; derivation belongs
+to post-processing. The run hash is taken over the effective config after
+command-line overrides, so two runs under different release dates differ.
 """
 
 from __future__ import annotations
@@ -33,26 +21,18 @@ Normalisation = Literal["strip", "upper", "lower"]
 
 
 class Strict(BaseModel):
-    """Unknown keys are an error.
-
-    A misspelled key that is silently ignored means the config does not say what
-    its author thinks it says, and the resulting data is wrong in a way nothing
-    reports.
-    """
+    """Unknown keys are an error; a misspelled one would silently do nothing."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-#: Formats the reader can actually open. The type below is wider on purpose:
-#: naming a format the store does not yet read should say so, rather than
-#: reporting it as an unknown word.
+#: Formats the reader can open; the type below is wider so an unimplemented one is named as such.
 IMPLEMENTED_FORMATS = frozenset({"csv"})
 
 
 class ReaderSpec(Strict):
     format: Literal["csv", "parquet", "json", "xlsx"] = "csv"
-    #: Passed to the reader. Kept opaque so a format's own options do not have to
-    #: be re-declared here every time one is added.
+    #: Passed to the reader verbatim.
     options: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -76,17 +56,14 @@ class EntitySpec(Strict):
 
 
 class EventTimeSpec(Strict):
-    #: Which column carries the time. Omitted when the *column names* do, which
-    #: is the `periods_in_columns` layout.
+    #: Which column carries the time; omitted under the `periods_in_columns` layout.
     column: str | None = None
     #: Set when each melted column name is a period label rather than a feature.
     from_column_name: bool = False
     #: strptime format. Omitted means the reader already produced a date.
     format: str | None = None
     period: str = "irregular"
-    #: Which end of the period `event_time` names. Defaults to the end, and the
-    #: reason is not cosmetic: see docs/adr/0001. A period label anchored to its
-    #: start claims a figure was knowable months before it existed.
+    #: Which end of the period `event_time` names; see ``docs/adr/0001``.
     anchor: str = "end"
 
     @model_validator(mode="after")
@@ -108,7 +85,7 @@ class EventTimeSpec(Strict):
 
 
 class KnowledgeTimeSpec(Strict):
-    """When a value became available — never when the file was downloaded."""
+    """When a value became available, and how that was determined. See ``docs/adr/0003``."""
 
     basis: Literal["publisher_timestamp", "file_release", "modeled_lag", "ingest_fallback"]
 
@@ -119,19 +96,12 @@ class KnowledgeTimeSpec(Strict):
     format: str | None = None
     #: modeled_lag: ISO-8601, e.g. 'P18M'.
     declared_lag: str | None = None
-    #: modeled_lag: measure the lag from the end of this period rather than from
-    #: the raw event date. A publisher that releases annually publishes January
-    #: and December of one year together; lagging each event date separately
-    #: would claim they became knowable a year apart.
+    #: modeled_lag: measure the lag from the end of this period rather than the raw event date.
     lag_anchor_period: str | None = None
-    #: Why this rule, in the author's words. Carried into the catalog because a
-    #: lag with no stated reason cannot be reviewed, only inherited.
+    #: Why this rule, in the author's words; carried into the catalog.
     rationale: str | None = None
 
-    #: A null knowledge_time has no safe default. In a publisher_timestamp group
-    #: it is indistinguishable at read from a modeled_lag group's deliberate
-    #: null, so the COALESCE would silently apply a lag that group never
-    #: declared. Say what to do, or it is an error.
+    #: What a null knowledge_time means here; it has no safe default, see ``docs/adr/0003``.
     on_null: Literal["error", "drop", "fallback_to_file_release"] = "error"
 
     @model_validator(mode="after")
@@ -176,21 +146,12 @@ class SuffixRule(Strict):
 
 
 class FeatureMetaSpec(Strict):
-    """How to read structure out of feature names.
+    """How to read a base quantity, scale and statistic out of a feature name.
 
-    Publishers with thousands of columns encode structure in the names: a base
-    quantity, the scale it is expressed on, and which summary statistic this
-    particular column is. Recording that structure makes "the point estimates"
-    selectable without listing four thousand names or matching suffixes by hand
-    at query time.
-
-    This is annotation, not derivation. It records what a feature *is*; it never
-    touches a value.
+    Annotation only; it never touches a value.
     """
 
-    #: Applied longest-first and repeatedly, so a two-part suffix decomposes
-    #: fully. Matching once would read `_osp_codelow` as an `_osp` column and
-    #: lose the interval, or as a `_codelow` column and lose the scale.
+    #: Applied longest-first and repeatedly, so a two-part suffix decomposes fully.
     suffixes: list[SuffixRule] = Field(default_factory=list)
     default_scale: str | None = None
     default_statistic: str | None = None
@@ -206,29 +167,14 @@ class FeatureNameSpec(Strict):
     #: Only these, if given.
     allow: list[str] | None = None
     #: Whether a column absent from `rename` may be ingested under its raw name.
-    #: False by default: a new upstream column is a feature nobody named, and
-    #: taking it under its raw code is how a vocabulary registry rots. Sources
-    #: whose published names *are* the vocabulary set this true, deliberately.
     allow_unlisted: bool = False
 
 
 class VocabularySpec(Strict):
-    """A companion file describing the features, rather than carrying facts.
+    """A companion release describing the features; it never decides what is ingested.
 
-    Publishers ship these alongside the data: a row per indicator giving its
-    unit, its definition, how it is aggregated, where it came from. That is
-    exactly what ``feature.unit``, ``feature.description`` and ``feature.meta``
-    are for, and without it a store holding thousands of indicators knows every
-    one of their names and nothing about any of them.
-
-    Pinned to a release digest for the same reason a crosswalk version is: the
-    file is reissued, definitions get revised, and a description resolved afresh
-    on every run would silently change what an old ingest claimed a number
-    meant.
-
-    It describes; it never decides what is ingested. A feature present in the
-    data and absent here still gets a registry row, because the data is the
-    authority on what exists and this is the authority on what it means.
+    Pinned to a release digest so a reissued file cannot change what an old
+    ingest claimed a number meant.
     """
 
     #: Which release describes the features. A digest, or an unambiguous prefix.
@@ -272,43 +218,22 @@ class StandardiseSpec(Strict):
     feature_group: str
     source: str
     reader: ReaderSpec = Field(default_factory=ReaderSpec)
-    #: What the melted column headers mean, which decides which of the seven
-    #: fields they become.
-    #:
-    #: ``features_in_columns``  each column is a feature; the row carries entity
-    #:                          and time
-    #: ``periods_in_columns``   each column is a period; the row carries entity
-    #:                          and feature name
-    #: ``long``                 nothing to melt; one row is already one fact
-    #:
-    #: Named for what is in the columns rather than for a shape, because both
-    #: melted layouts are "wide" in some direction and the word does not say
-    #: which.
+    #: What the melted column headers are: features, periods, or nothing to melt.
     layout: Literal["features_in_columns", "periods_in_columns", "long"] = "features_in_columns"
     entity: EntitySpec
     event_time: EventTimeSpec
     knowledge_time: KnowledgeTimeSpec
     features: FeatureSelection
-    #: Whether this publisher's nulls withdraw a value or mean "not reported".
-    #: Opposite meanings the format cannot distinguish, so it is declared.
+    #: Whether this publisher's nulls withdraw a value; see ``docs/adr/0009``.
     retraction_policy: Literal["honour", "ignore"] = "honour"
-    #: Crosswalk pinned for converting native entity ids to canonical ones.
-    #: Required when the source's vocabulary is not the canonical one.
+    #: Crosswalk pinned for canonicalising entity ids; required for a non-canonical source.
     crosswalk: CrosswalkPin | None = None
     description: str | None = None
 
     @model_validator(mode="after")
     def _layout_is_coherent(self):
         if self.layout == "long":
-            # Accepted by the type and unimplemented in the melt, which always
-            # unpivots. A file that is already one row per fact would be
-            # reshaped into nonsense, and nothing would report it.
-            #
-            # Left in the type rather than removed because the shape is real and
-            # will arrive; it is refused until something can read it. The one
-            # source that looked like it would force this turned out to need
-            # periods_in_columns instead, which is a fair warning against
-            # guessing its interface in advance.
+            # Kept in the type because the shape is real; refused until the melt can read it.
             raise ValueError(
                 "layout 'long' is declared but not implemented: the melt always "
                 "unpivots, so a file already in long form would be reshaped into "
@@ -351,14 +276,7 @@ StandardiseSpec.model_rebuild()
 def decompose(name: str, meta: FeatureMetaSpec | None) -> dict[str, Any]:
     """Split a feature name into its base and what its suffixes declare.
 
-    Suffixes are stripped repeatedly, longest first, so a name carrying two of
-    them decomposes fully:
-
-        v2clacjstm_osp_codelow -> base v2clacjstm, scale original, statistic ci_low
-
-    A single pass would report the base as ``v2clacjstm_osp`` and invent a
-    feature family that does not exist — which is exactly the mistake that makes
-    hand-written suffix matching at query time unreliable.
+    Suffixes are stripped longest-first, repeatedly, until none match.
     """
     if meta is None:
         return {"base": name}
@@ -372,8 +290,7 @@ def decompose(name: str, meta: FeatureMetaSpec | None) -> dict[str, Any]:
         for rule in rules:
             if not stem.endswith(rule.suffix) or len(stem) <= len(rule.suffix):
                 continue
-            # First match wins per axis: the outermost suffix is the more
-            # specific statement, and an inner one must not overwrite it.
+            # First match wins per axis: the outermost suffix is the more specific statement.
             if rule.scale is not None:
                 attributes.setdefault("scale", rule.scale)
             if rule.statistic is not None:

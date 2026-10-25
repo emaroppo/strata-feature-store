@@ -1,25 +1,8 @@
 """Where things are, and how to reach them.
 
-Three layers, and the split is a rule rather than a habit:
-
-``config.toml``
-    Locations. Which database, which endpoint, which bucket, which canonical
-    vocabulary. Machine-local and gitignored, because a checkout on another
-    host points somewhere else.
-
-the environment
-    Credentials, and only credentials. Nothing that is a secret is ever written
-    to a file this repository can read, so a config accidentally committed
-    leaks a hostname rather than a key.
-
-``configs/*.json``
-    Meaning. What a column is, how a feature is named, what an as-of policy is.
-    These *are* tracked, because they decide what a number means and belong
-    under review with the code that consumes them.
-
-The failure this arrangement prevents is the ordinary one: a credential in a
-config file, a config file in a commit, and no way to know how long it was
-there.
+``config.toml`` holds locations and is gitignored; the environment holds
+credentials and nothing else; ``configs/*.json`` hold meaning and are tracked.
+See ``strata/docs/adr/0019``.
 """
 
 from __future__ import annotations
@@ -46,12 +29,7 @@ class CatalogSettings:
     url: str
 
     def with_password(self) -> str:
-        """The URL with ``$PGPASSWORD`` spliced in, if it is set and absent.
-
-        Kept out of ``config.toml`` so the file stays shareable. A URL that
-        already carries a password is left alone, since overriding it silently
-        would be worse than either behaviour on its own.
-        """
+        """The URL with ``$PGPASSWORD`` spliced in when it is set and the URL carries none."""
         password = os.environ.get(PASSWORD_VAR)
         if not password or "@" not in self.url:
             return self.url
@@ -79,13 +57,7 @@ class StorageSettings:
 
     @property
     def duckdb_endpoint(self) -> str:
-        """The endpoint as DuckDB wants it: host and port, no scheme.
-
-        boto3 takes a full URL and DuckDB refuses one. Getting this wrong fails
-        with a message about the request rather than about the setting, which is
-        why the two forms are derived from one value rather than configured
-        twice and allowed to drift apart.
-        """
+        """The endpoint as DuckDB wants it: host and port, no scheme. See ``docs/adr/0010``."""
         _, _, hostport = self.endpoint_url.partition("://")
         return hostport or self.endpoint_url
 
@@ -98,8 +70,7 @@ class StorageSettings:
 class Settings:
     catalog: CatalogSettings
     storage: StorageSettings
-    #: The vocabulary every stored parquet is written in. Configuration rather
-    #: than a constant: right for country panels, wrong for actors or firms.
+    #: The vocabulary every stored parquet is written in; see ``docs/adr/0005``.
     canonical_namespace: str
     path: Path | None = None
 

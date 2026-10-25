@@ -1,16 +1,8 @@
 """Workflow steps 1 and 2: submit a file, keep it exactly as it arrived.
 
-Nothing here parses, unzips, sniffs or normalises. The file goes into the store
-byte-identical to what the publisher served, and the only thing derived from it
-is its digest. That restraint is what makes a mapping mistake recoverable: when
-a standardisation config turns out to have named a column wrong, the fix is to
-re-standardise from these bytes rather than to re-download and hope the
-publisher still serves the same vintage. Publishers routinely do not.
-
-**Order of operations, which is invariant 3.** Hash, upload, verify the upload,
-then write the catalog row. A crash anywhere before the last step leaves an
-object nothing points at — findable by ``verify`` and removable — rather than a
-catalog row pointing at bytes that are not there.
+Nothing here parses or normalises; the retained bytes are what makes a mapping
+mistake recoverable by re-standardising. Hash, upload, verify, then the catalog
+row (invariant 3). See ``docs/adr/0005``.
 """
 
 from __future__ import annotations
@@ -67,10 +59,7 @@ def register_source(
             "kind": kind,
         },
     ) as current:
-        # The vocabulary is NOT created here. Auto-creating it would make
-        # the guard in add_source unreachable, and a typo in the namespace
-        # would silently mint a new vocabulary that nothing can join to.
-        # Registering a vocabulary is its own deliberate act.
+        # The vocabulary is not created here: a typo would otherwise mint one nothing can join to.
         source_id = catalog.add_source(
             current,
             name=name,
@@ -99,10 +88,8 @@ def add_release(
 ) -> IngestResult:
     """Put one downloaded file into the store and record it.
 
-    ``released_at`` is the publisher's vintage and ``retrieved_at`` is when we
-    fetched it. They are separate on purpose: conflating them, and stamping a
-    2024 archive with today's date, makes every as-of query before today return
-    nothing — which reads as missing data rather than as a mistake.
+    ``released_at`` is the publisher's vintage, ``retrieved_at`` when we fetched it.
+    See ``docs/adr/0003``.
     """
     path = Path(path)
     if not path.is_file():
@@ -157,9 +144,7 @@ def add_release(
             size_bytes=stored.size_bytes,
             uploaded=stored.uploaded,
         )
-        # A release is a fact that became knowable when it was published.
-        # Recording it here is what lets invariant 1 compare a later
-        # standardise run against the release it read.
+        # Recorded so invariant 1 can compare a later standardise run against the release it read.
         if released_at is not None:
             current.observed_knowledge_time(
                 datetime(released_at.year, released_at.month, released_at.day)

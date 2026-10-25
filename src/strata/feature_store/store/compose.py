@@ -1,39 +1,37 @@
-"""Workflow step 4: resolve a spec to what was knowable.
+"""Workflow step 4: resolve a composition to what was knowable, and freeze it.
 
-One function builds the query, and both freeze modes call it. ``query`` runs it
-to prove the spec executes and stores the spec; ``materialized`` runs it and
-writes the parquet. The materialised path is therefore a cache of the query
-path, never a second implementation, and a test asserts the two produce equal
-frames rather than the code merely intending them to.
-
-**The ASOF join keys on entity and feature together.** Keying on entity alone
-matches a country's GDP against its population's timeline — the join succeeds,
-the row count looks right, and every value is attached to the wrong feature's
-history. The architecture sketch omits ``feature_name`` from its ON clause and
-is easy to copy verbatim and be wrong.
-
-**Two time axes are pinned, not one.** A pinned as-of cutoff alone does not make
-a version reproducible: a fact ingested later whose knowledge_time falls before
-the cutoff would change the answer, which is precisely what a bitemporal store
-exists to represent. So resolution also filters on an ``ingest_watermark``, and
-reads of a pinned version warn when that withholds something.
+One query serves both freeze modes, so a materialised version is a cache of the
+query form and never a second implementation. See ``docs/adr/0007``.
 """
 
 from __future__ import annotations
 
+import calendar
+import tempfile
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 import sqlalchemy as sa
 
 from strata.feature_store.spec import schema as long_schema
+from strata.feature_store.spec.canonical import content_hash, hash_file, to_jsonable
 from strata.feature_store.spec.compose import ComposeSpec, FeatureRef
 from strata.feature_store.spec.duration import add_duration, parse_duration
 from strata.feature_store.spec.timebasis import knowledge_time_sql
-from strata.feature_store.store import catalog, duck
+from strata.feature_store.store import catalog, duck, objects
 from strata.feature_store.store.config import Settings
-from strata.feature_store.store.tables import entity_list, entity_list_member, entity_list_version
+from strata.feature_store.store.runs import run as open_run
+from strata.feature_store.store.tables import (
+    dataset,
+    dataset_version,
+    entity_list,
+    entity_list_member,
+    entity_list_version,
+    feature_partition,
+)
+from strata.feature_store.store.tables import feature as feature_table
 from strata.feature_store.store.tables import feature_group as feature_group_table
 
 
@@ -48,9 +46,7 @@ class ResolvedGroup:
     id: int
     name: str
     entity_namespace: str
-    #: Full s3:// URLs, built from the catalog rather than by listing a prefix.
-    #: That is invariant 7: a glob would also read the orphans a failed run
-    #: leaves behind, and those describe part of a group with nothing saying so.
+    #: Full s3:// URLs from the catalog, never from listing a prefix (invariant 7).
     urls: list[str]
     knowledge_time: str
     retraction_policy: str = "honour"
@@ -67,10 +63,7 @@ class Plan:
     watermark: datetime
     namespace: str
     storage: Any = None
-    #: Each selected feature's stored type, from the vocabulary registry. A wide
-    #: output emits one value column per feature rather than both, because a
-    #: numeric feature's string column is null in every row of every panel and
-    #: doubling the column count with guaranteed nulls helps nobody.
+    #: Each selected feature's stored type, so a wide output emits one value column per feature.
     dtypes: dict = field(default_factory=dict)
 
 
@@ -80,11 +73,10 @@ def _quote_literal(value: str) -> str:
 
 
 def plan(connection: sa.Connection, spec: ComposeSpec, settings: Settings) -> Plan:
-    """Validate the spec against the catalog and gather what it needs.
+    """Validate the spec against the catalog and gather what resolution needs, opening no object.
 
-    Everything that can fail on a misconfiguration fails here, before any
-    object is opened. A spec naming a group that does not exist should say so
-    in a second, not after streaming a gigabyte.
+    Refuses an unknown group, feature or entity list, a group outside the
+    canonical namespace, and a group with no readable partitions.
     """
     groups: dict[str, ResolvedGroup] = {}
     for name in spec.groups:
@@ -105,10 +97,7 @@ def plan(connection: sa.Connection, spec: ComposeSpec, settings: Settings) -> Pl
             )
             raise ComposeError(f"no feature group named {name!r}. Available: {available}")
 
-        # Invariant 2 at read: every group in one composition must speak one
-        # vocabulary. Ids were canonicalised at write, so a group that is not
-        # canonical is the unmapped sibling, and joining it to the others would
-        # match ids that only look alike.
+        # Invariant 2 at read: a non-canonical group is the unmapped sibling. docs/adr/0006
         if row["entity_namespace"] != settings.canonical_namespace:
             raise ComposeError(
                 f"group {name!r} is in {row['entity_namespace']!r}, not the canonical "
@@ -157,13 +146,7 @@ def plan(connection: sa.Connection, spec: ComposeSpec, settings: Settings) -> Pl
 def _resolve_dtypes(
     connection: sa.Connection, spec: ComposeSpec, groups: dict[str, ResolvedGroup]
 ) -> dict[str, str]:
-    """What each selected feature is stored as, and a refusal if it is unknown.
-
-    The registry is what makes a typo in a feature name fail here rather than
-    resolving to a column of nulls that looks like missing data.
-    """
-    from strata.feature_store.store.tables import feature as feature_table
-
+    """What each selected feature is stored as; refuses a name the registry does not hold."""
     out: dict[str, str] = {}
     for ref in spec.features:
         dtype = connection.execute(
@@ -226,9 +209,7 @@ def _resolve_entities(
             raise ComposeError(f"entity list {source.name!r} v{source.version} is empty")
         return sorted(members)
 
-    # Every entity present in a group. Reproducible only because the version
-    # pins an ingest watermark; without one the set would grow under a frozen
-    # spec and two resolutions would differ in their row count.
+    # Every entity in a group; reproducible because the watermark is pinned. docs/adr/0007
     if source.from_group not in groups:
         raise ComposeError(
             f"the spine draws entities from {source.from_group!r}, which the spec does "
@@ -260,12 +241,7 @@ def _resolve_times(spec: ComposeSpec) -> list[date]:
 
 
 def _watermark(connection: sa.Connection, groups: dict[str, ResolvedGroup]) -> datetime:
-    """The highest ingest_time this composition can currently see.
-
-    Pinned into a frozen version so a later arrival cannot change the answer.
-    """
-    from strata.feature_store.store.tables import feature_partition
-
+    """The highest ingest_time this composition can currently see. See ``docs/adr/0007``."""
     highest = connection.execute(
         sa.select(sa.func.max(feature_partition.c.ingest_time)).where(
             feature_partition.c.feature_group_id.in_([g.id for g in groups.values()])
@@ -308,14 +284,9 @@ def build_sql(plan: Plan) -> str:
     entity_values = ", ".join(f"({_quote_literal(e)})" for e in plan.entities)
     time_values = ", ".join(f"(DATE '{t}')" for t in plan.times)
 
-    # One spine arm per feature, so each carries its own cutoff expression. A
-    # single arm with the cutoff in a VALUES list cannot work: the expression
-    # references the spine timestamp, which does not exist yet inside a literal.
-    #
-    # The spine is keyed by feature as well as entity and time, because the ASOF
-    # join resolves each feature against its own timeline. Keying on entity
-    # alone matches a country's GDP against its population's history — the join
-    # succeeds and every value is attached to the wrong feature.
+    # One spine arm per feature, each carrying its own cutoff expression; the
+    # ASOF join must key on feature as well as entity or every value lands on
+    # the wrong feature's timeline.
     arms = []
     for ref in spec.features:
         arms.append(
@@ -347,14 +318,9 @@ def build_sql(plan: Plan) -> str:
         WHERE f.ingest_time <= TIMESTAMP '{plan.watermark}'
           AND f.feature_name IN ({wanted})"""
         )
-    # UNION ALL rather than a join: identical schemas mean no column collisions
-    # and nothing to reconcile.
     facts = "\n        UNION ALL".join(fact_unions)
 
-    # Real calendar arithmetic, not an approximation. Comparing a resolved
-    # knowledge time plus the bound against the cutoff is exact for every month
-    # length; converting months to days is not, and a staleness bound that
-    # drifts by two days a year is a bound nobody can reason about.
+    # Calendar arithmetic on the interval, so a bound in months is exact for every month length.
     stale_cases = [
         f"WHEN output_name = {_quote_literal(ref.output_name)} "
         f"AND kt + {_age_interval(ref.max_age)} < cutoff THEN TRUE"
@@ -363,9 +329,7 @@ def build_sql(plan: Plan) -> str:
     ]
     stale = f"CASE {' '.join(stale_cases)} ELSE FALSE END" if stale_cases else "FALSE"
 
-    # Only groups whose publisher withdraws a value by emitting a null. For the
-    # others a null is filler meaning "not reported", and treating it as a
-    # withdrawal would erase a perfectly good earlier figure.
+    # A null withdraws a value only in groups that honour retraction. docs/adr/0009
     honouring = [
         _quote_literal(ref.group)
         for ref in spec.features
@@ -410,9 +374,7 @@ def build_sql(plan: Plan) -> str:
             spine_time,
             cutoff AS data_through,
             output_name AS feature_name,
-            -- Staleness nulls the value and its metadata together. Applied
-            -- before any pivot, so a nulled value takes its age with it rather
-            -- than leaving an age beside an empty cell.
+            -- Staleness nulls the value and its metadata together, before any pivot.
             CASE WHEN stale THEN NULL ELSE value_num END AS value_num,
             CASE WHEN stale THEN NULL ELSE value_str END AS value_str,
             CASE WHEN stale THEN NULL ELSE kt END AS knowledge_time,
@@ -444,16 +406,10 @@ def _long_select(spec: ComposeSpec) -> str:
 
 
 def _wide_select(plan: Plan) -> str:
-    """The same samples, pivoted so observations are rows and features columns.
+    """The same samples pivoted, observations as rows and features as columns.
 
-    Written out explicitly rather than with DuckDB's PIVOT, because the column
-    set has to be exactly what the spec asked for, in that order, whether or not
-    a feature happened to resolve to anything. A dynamic pivot infers its
-    columns from the data, so a feature that resolved to nothing for every row
-    would silently vanish from the output.
-
-    Wide is a presentation of the same samples: an output covering n
-    observations and f features holds n x f samples either way.
+    Written out rather than with DuckDB's PIVOT, which infers columns from the
+    data and would drop a feature that resolved to nothing. See ``docs/adr/0002``.
     """
     spec = plan.spec
     columns = ["entity_id", "spine_time"]
@@ -501,21 +457,15 @@ def _age_interval(max_age: str) -> str:
 
 
 def resolve(plan: Plan, connection=None, memory_limit: str = "4GB"):
-    """Run the query and hand back the relation.
-
-    Callers get a DuckDB relation rather than a frame, so a materialising freeze
-    can COPY it straight out without it ever being in memory.
-    """
+    """Run the query and hand back a DuckDB relation, so a freeze can COPY it out of memory."""
     con = connection or duck.connect(plan.storage, memory_limit=memory_limit)
     return con.sql(build_sql(plan))
 
 
 def max_cutoff(plan: Plan) -> date:
-    """The latest moment any spine row is allowed to know something.
+    """The latest moment any spine row may know something; bounds the withheld count.
 
-    Used to bound what the watermark is withholding: a fact that became
-    knowable after every cutoff was never going to be visible anyway, so
-    counting it would report a problem that does not exist.
+    See ``docs/adr/0007``.
     """
     spec = plan.spec
     latest = max(plan.times)
@@ -539,8 +489,6 @@ def max_cutoff(plan: Plan) -> date:
 
 def _subtract(day: date, offset: str) -> date:
     """*day* minus an ISO-8601 duration, months first."""
-    import calendar
-
     duration = parse_duration(offset)
     index = day.month - 1 - duration.months
     year = day.year + index // 12
@@ -552,16 +500,9 @@ def _subtract(day: date, offset: str) -> date:
 
 
 def withheld_by_watermark(plan: Plan) -> dict[str, Any]:
-    """What a pinned watermark is currently excluding, and from where.
+    """The facts knowable by the latest cutoff that arrived after the watermark, counted per group.
 
-    These are the facts that were genuinely knowable by the composition's latest
-    cutoff but arrived here afterwards. Both conditions matter: something
-    ingested late that only became knowable later was never in scope, and
-    reporting it would raise an alarm about nothing.
-
-    Pinning silently withholds data, and the silence is the danger — a pinned
-    version resolving against a store that has since learned more is how a
-    backtest stays reproducible and wrong at the same time.
+    See ``docs/adr/0007``.
     """
     con = duck.connect(plan.storage)
     ceiling = max_cutoff(plan)
@@ -626,21 +567,10 @@ def freeze(
     s3=None,
     memory_limit: str = "4GB",
 ) -> FrozenVersion:
-    """Pin a composition so it resolves to the same data forever.
+    """Pin a composition as a new dataset version; ``materialized`` also writes the parquet.
 
-    ``query`` stores the spec and the watermark and copies no bytes; the answer
-    is recomputed on demand and cannot drift, because both time axes are pinned.
-    ``materialized`` additionally writes the parquet.
-
-    Both run the *same* ``resolve``. The materialised form is a cache of the
-    query form, and ``test_materialized_equals_query`` is what keeps that true
-    rather than merely intended.
+    Both modes run the same ``resolve``. See ``docs/adr/0007`` and ``docs/adr/0008``.
     """
-    from strata.feature_store.spec.canonical import content_hash, to_jsonable
-    from strata.feature_store.store import objects
-    from strata.feature_store.store.runs import run as open_run
-    from strata.feature_store.store.tables import dataset, dataset_version
-
     s3 = s3 or objects.client(settings.storage)
     canonical = to_jsonable(spec.canonical())
     digest = content_hash(canonical)
@@ -684,11 +614,6 @@ def freeze(
         rows = None
         prefix = None
         if spec.freeze.mode == "materialized":
-            import tempfile
-            from pathlib import Path
-
-            from strata.feature_store.spec.canonical import hash_file
-
             work = Path(tempfile.mkdtemp(prefix="feature-store-compose-"))
             local = work / "part.parquet"
             con.execute(f"COPY ({relation.sql_query()}) TO '{local}' (FORMAT PARQUET)")
@@ -705,13 +630,10 @@ def freeze(
             if landed["ContentLength"] != size:
                 raise ComposeError(f"upload of {prefix} did not land intact")
         else:
-            # Run it once anyway. A frozen spec that does not execute is a
-            # promise nobody checked, and the failure would surface much later
-            # to whoever trusted the pin.
+            # Run it once anyway, so a frozen spec is known to execute.
             rows = con.execute(f"SELECT count(*) FROM ({relation.sql_query()})").fetchone()[0]
 
-        # The spec travels next to the bytes as well as into the catalog, so a
-        # frozen output stays interpretable if the catalog is ever lost.
+        # The spec travels next to the bytes, so a frozen output outlives the catalog.
         objects.put_bytes(
             s3,
             settings.storage.bucket,
@@ -752,33 +674,15 @@ def freeze(
 
 def load_version(connection: sa.Connection, name: str, version: int | None = None) -> dict:
     """A frozen version's row, defaulting to the newest."""
-    from strata.feature_store.store.tables import dataset, dataset_version
-
-    query = (
-        sa.select(dataset_version)
-        .join(dataset, dataset.c.id == dataset_version.c.dataset_id)
-        .where(dataset.c.name == name)
-        .order_by(dataset_version.c.version_num.desc())
-    )
-    if version is not None:
-        query = query.where(dataset_version.c.version_num == version)
-    row = connection.execute(query).mappings().first()
-    if row is None:
-        available = (
-            connection.execute(
-                sa.select(dataset_version.c.version_num)
-                .join(dataset, dataset.c.id == dataset_version.c.dataset_id)
-                .where(dataset.c.name == name)
-                .order_by(dataset_version.c.version_num)
-            )
-            .scalars()
-            .all()
-        )
-        raise ComposeError(
+    return catalog.version_row(
+        connection,
+        name,
+        version,
+        error=lambda available: ComposeError(
             f"no dataset {name!r}"
             + (f" at version {version}. Available: {available}" if available else "")
-        )
-    return dict(row)
+        ),
+    )
 
 
 def read(
@@ -790,13 +694,9 @@ def read(
     latest: bool = False,
     memory_limit: str = "4GB",
 ):
-    """Resolve a frozen version, and report what its watermark is withholding.
+    """Resolve a frozen version and return the relation with what its watermark withholds.
 
-    Returns the relation and a warning dictionary. Pinning silently withholds
-    data, and silence is the problem: a pinned version resolving against a store
-    that has since learned more is how a backtest stays reproducible and wrong at
-    the same time. ``latest=True`` ignores the watermark, which answers "what
-    have we learned since" without freezing anything.
+    ``latest=True`` ignores the watermark and returns an empty warning. See ``docs/adr/0007``.
     """
     with engine.connect() as connection:
         row = load_version(connection, name, version)

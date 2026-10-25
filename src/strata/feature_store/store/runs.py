@@ -1,31 +1,8 @@
-"""Runs, and why lineage cannot be skipped.
+"""Runs: the unit every catalog write attaches to, so lineage is never opt-in (invariant 4).
 
-Invariant 4 says lineage is automatic and never opt-in, and the enforcement is
-the type signature rather than a convention. Every function that writes to the
-catalog takes a :class:`Run` as its first argument, and a ``Run`` can only be
-obtained from :func:`run`, which has already inserted the row before it yields.
-There is therefore no code path that writes a catalog row without lineage — not
-because writing one would be wrong, but because there is no way to express it.
-
-The alternative, a ``record_lineage()`` call that writers are expected to make,
-gets skipped exactly once and then always, and a catalog whose lineage is
-partial is worse than one with none: it looks trustworthy.
-
-**Invariant 1 is checked at the close of the run.** A run whose outputs claim a
-``knowledge_time`` earlier than its inputs has looked into the future somewhere,
-and the arithmetic catches most lookahead bugs that survive the join logic.
-
-**A run is many transactions, not one.** Each write commits as it happens, and
-the run row stays ``running`` until the whole thing finishes. Visibility comes
-from the run's status rather than from an uncommitted transaction: a reader
-filters to partitions whose creating run reached ``ok``, so a half-finished
-ingest is invisible for the same reason it was before — but its work survives a
-crash, its progress is observable, and the retry is cheap because an identical
-part is already a no-op.
-
-Holding one transaction open for the whole run bought that same visibility more
-bluntly, at the cost of a twenty-minute snapshot, no progress, and discarding
-every catalog row when the last batch failed.
+A run is many short transactions, not one; visibility follows the run's status,
+so a half-finished run's work survives a crash and stays invisible to readers.
+Invariant 1, outputs never knowing more than inputs, is checked at close.
 """
 
 from __future__ import annotations
@@ -60,13 +37,7 @@ class LineageError(RuntimeError):
 class Run:
     """A unit of work, already recorded, that catalog writes attach themselves to.
 
-    Constructed only by :func:`run`. The ``id`` exists before any output does,
-    which is what lets a write reference it without a second pass.
-
-    Holds an engine rather than a connection, and opens a short transaction per
-    write. ``connection`` is set only while inside :meth:`transaction`, so a
-    catalog write attempted outside one fails immediately rather than silently
-    joining somebody else's transaction.
+    Constructed only by :func:`run`; ``connection`` is set only inside :meth:`transaction`.
     """
 
     id: int
@@ -82,12 +53,7 @@ class Run:
 
     @contextmanager
     def transaction(self) -> Iterator[sa.Connection]:
-        """A short transaction, reentrant so nested writes share one.
-
-        Reentrancy matters: a caller that wraps several catalog writes in one
-        transaction gets atomicity across them, while a lone write still commits
-        on its own without the caller arranging anything.
-        """
+        """A short transaction, reentrant so nested writes share one."""
         if self.connection is not None:
             yield self.connection
             return
@@ -101,8 +67,6 @@ class Run:
     def read(self, ref_type: str, ref_id: int, role: str = "input") -> None:
         """Record that this run read something."""
         self._inputs.append((ref_type, ref_id, role))
-        # Recording the same read twice is harmless and happens naturally when a
-        # run loops; the lineage edge is the fact, not how often it was noticed.
         with self.transaction() as connection:
             connection.execute(
                 pg_insert(run_input)
@@ -128,13 +92,7 @@ class Run:
             self._max_knowledge_time = when
 
     def note(self, **values: Any) -> None:
-        """Attach counts and decisions to the manifest.
-
-        This is where a standardise run says how many rows it wrote, how many
-        entities it could not map, and how many values a release changed —
-        the numbers that make an ingest reviewable after the fact rather than
-        only at the moment it ran.
-        """
+        """Attach counts and decisions to the manifest. See ``strata/docs/adr/0036``."""
         self._notes.update(values)
 
     @property
@@ -143,11 +101,7 @@ class Run:
 
 
 def git_state(root: str | None = None) -> tuple[str | None, bool]:
-    """The commit this ran from, and whether the tree was dirty.
-
-    A dirty tree means the recorded sha does not fully describe the code, so it
-    is recorded as a fact rather than quietly ignored.
-    """
+    """The commit this ran from and whether the tree was dirty; ``(None, False)`` outside git."""
     try:
         sha = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -192,9 +146,7 @@ def _naive_utc_now() -> datetime:
 
 def _inputs_max_knowledge_time(connection: sa.Connection, run_id: int) -> datetime | None:
     """The greatest knowledge_time reached by the runs that produced this run's inputs."""
-    # Every run that produced something this run read. A reference matches on
-    # both halves: ref_type alone would join a release id against a partition id
-    # that happens to share a number.
+    # A reference matches on both halves: ids are only unique within a ref_type.
     producing = (
         sa.select(run_output.c.run_id)
         .join(
@@ -224,9 +176,9 @@ def run(
 ) -> Iterator[Run]:
     """Open a run, yield it, and close it with its status and lineage recorded.
 
-    The row is committed before the body executes, so a process killed mid-run
-    leaves a ``running`` row naming what it was doing, alongside whatever work it
-    had already committed. ``verify --run`` is what reconciles those afterwards.
+    The row is committed before the body runs, so a killed process leaves a
+    ``running`` row for ``verify --run`` to reconcile. Raises ``LineageError``
+    and marks the run failed when its outputs know more than its inputs.
     """
     params = params or {}
     sha, dirty = git_state()
@@ -240,9 +192,7 @@ def run(
                 config_hash=content_hash(params),
                 code_git_sha=sha,
                 code_dirty=int(dirty),
-                # Through the canonical form, so a JSONB column never meets a
-                # date its driver cannot serialise, and so what is stored is
-                # exactly what config_hash was computed over.
+                # Through the canonical form, so what is stored is exactly what config_hash covers.
                 params=to_jsonable(params),
                 env=to_jsonable(environment()),
                 status="running",
@@ -283,8 +233,7 @@ def run(
     if s3 is not None and bucket is not None:
         manifest_key = write_manifest(s3, bucket, current, started)
 
-    # The last write, and the one that makes everything this run produced
-    # visible to a reader. Until it lands, the partitions exist and are ignored.
+    # The last write is what makes the run's outputs visible to a reader.
     with engine.begin() as connection:
         connection.execute(
             sa.update(run_table)
@@ -299,12 +248,7 @@ def run(
 
 
 def manifest(current: Run, started: datetime) -> dict[str, Any]:
-    """The self-describing record of one run.
-
-    Written next to the bytes so an artifact stays interpretable when the
-    catalog is gone: it carries the effective config, its hash, the code state,
-    and what the run read and produced.
-    """
+    """The self-describing record of one run, written beside the bytes to outlive the catalog."""
     sha, dirty = git_state()
     return {
         "schema_version": 1,
@@ -330,6 +274,7 @@ def manifest_key_for(current: Run, started: datetime) -> str:
 
 
 def write_manifest(s3, bucket: str, current: Run, started: datetime) -> str:
+    # Deferred: objects imports boto3, which catalog-only CLI commands never need.
     from strata.feature_store.store.objects import put_bytes
 
     key = manifest_key_for(current, started)

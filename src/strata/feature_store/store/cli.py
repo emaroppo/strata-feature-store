@@ -1,19 +1,31 @@
 """The command line, one sub-app per noun.
 
-Commands are thin on purpose: parse arguments, load settings, call the module
-that does the work, print what happened. Nothing here decides anything, so every
-operation stays callable as a library — which is what a scheduled job or a
-notebook will want, and what keeps the CLI from becoming the only way in.
+Commands parse, load settings, call the library and print what it returned;
+nothing here decides anything. See ``strata/docs/adr/0030``.
 """
 
 from __future__ import annotations
 
+import json
+import os
 from datetime import datetime
+from importlib.metadata import version as _version
 from pathlib import Path
 
+import sqlalchemy as sa
 import typer
 from rich.console import Console
+from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
+from strata.common import database
+
+from strata.feature_store.spec.compose import ComposeSpec
+from strata.feature_store.store import catalog
+from strata.feature_store.store import config as store_config
+from strata.feature_store.store.runs import run as open_run
+from strata.feature_store.store.tables import dataset, dataset_version, run_input, run_output
+from strata.feature_store.store.tables import release as release_table
+from strata.feature_store.store.tables import run as run_table
 
 app = typer.Typer(
     name="feature-store",
@@ -33,17 +45,10 @@ err = Console(stderr=True)
 
 
 def _settings(config_path: Path | None = None):
-    from strata.feature_store.store import config as store_config
-
     return store_config.load(config_path)
 
 
 def _engine(settings):
-    # The way every strata database is opened. On Postgres it is
-    # create_engine and nothing more; the one place to change if a
-    # connection setting ever matters.
-    from strata.common import database
-
     return database.engine(settings.catalog.with_password())
 
 
@@ -64,16 +69,13 @@ def _human_bytes(count: int) -> str:
 @app.command()
 def version() -> None:
     """Print the installed version."""
-    from importlib.metadata import version as _version
-
-    console.print(_version("feature-store"))
+    console.print(_version("strata-feature-store"))
 
 
 @app.command("init-db")
 def init_db(config: Path | None = typer.Option(None, help="Path to config.toml.")) -> None:
     """Create or upgrade the catalog schema."""
-    import os
-
+    # Deferred: alembic is slow to import and only this command migrates.
     from alembic import command
     from alembic.config import Config
 
@@ -91,9 +93,6 @@ def namespace_add(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Register an entity vocabulary."""
-    from strata.feature_store.store import catalog
-    from strata.feature_store.store.runs import run as open_run
-
     settings = _settings(config)
     with open_run(_engine(settings), "ingest_release", f"namespace {name}", {"name": name}) as run:
         catalog.ensure_namespace(run, name, description=description, external_ref=external_ref)
@@ -112,7 +111,8 @@ def source_register(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Register a publisher's product. Releases arrive against it."""
-    from strata.feature_store.store import catalog, ingest
+    # Deferred: pulls in duckdb and boto3, which the CLI need not load to print --help.
+    from strata.feature_store.store import ingest
 
     settings = _settings(config)
     try:
@@ -135,8 +135,6 @@ def source_register(
 @source_app.command("ls")
 def source_ls(config: Path | None = typer.Option(None)) -> None:
     """List registered sources."""
-    from strata.feature_store.store import catalog
-
     settings = _settings(config)
     with _engine(settings).begin() as connection:
         rows = catalog.list_sources(connection)
@@ -169,7 +167,8 @@ def release_add(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Store a downloaded file exactly as it arrived, and record it."""
-    from strata.feature_store.store import catalog, ingest
+    # Deferred: pulls in duckdb and boto3, which the CLI need not load to print --help.
+    from strata.feature_store.store import ingest
 
     settings = _settings(config)
     try:
@@ -186,8 +185,7 @@ def release_add(
         _fail(str(exc))
 
     verb = "stored" if result.uploaded else "already present"
-    # soft_wrap: an object key broken across lines reads like a corrupted value,
-    # and these are meant to be copied.
+    # soft_wrap: a key broken across lines reads like a corrupted value.
     console.print(
         f"[green]{verb}[/green] {result.sha256[:12]}  {_human_bytes(result.size_bytes)}\n"
         f"  key      {result.object_key}\n"
@@ -207,8 +205,6 @@ def release_ls(
     config: Path | None = typer.Option(None),
 ) -> None:
     """List stored releases."""
-    from strata.feature_store.store import catalog
-
     settings = _settings(config)
     with _engine(settings).begin() as connection:
         source_id = None
@@ -241,7 +237,8 @@ def release_get(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Pull an original file back out, digest-verified on arrival."""
-    from strata.feature_store.store import catalog, ingest
+    # Deferred: pulls in duckdb and boto3, which the CLI need not load to print --help.
+    from strata.feature_store.store import ingest
 
     settings = _settings(config)
     try:
@@ -263,6 +260,7 @@ def crosswalk_register(
 
     The one-to-one check runs here, so a version that exists is safe to use.
     """
+    # Deferred: pulls in duckdb and boto3, which the CLI need not load to print --help.
     from strata.feature_store.store import crosswalk as cw
 
     settings = _settings(config)
@@ -280,9 +278,7 @@ def crosswalk_register(
 
 @app.command("standardise")
 def standardise_cmd(
-    # --spec rather than --config: every other command uses --config for
-    # config.toml, and one flag meaning two things is how the wrong file gets
-    # passed on a tired evening.
+    # --spec, not --config: every command uses --config for config.toml.
     config_file: Path = typer.Option(..., "--spec", exists=True, help="Standardisation config."),
     release: str = typer.Argument(..., help="Release digest, or an unambiguous prefix."),
     set_: list[str] = typer.Option(
@@ -294,8 +290,7 @@ def standardise_cmd(
     config: Path | None = typer.Option(None, help="Path to config.toml."),
 ) -> None:
     """Turn one release into long-format facts."""
-    import json
-
+    # Deferred: pulls in duckdb and boto3, which the CLI need not load to print --help.
     from strata.feature_store.store import standardise as std
 
     overrides: dict[str, object] = {}
@@ -314,11 +309,7 @@ def standardise_cmd(
     except Exception as exc:
         _fail(f"{config_file}: {exc}")
 
-    # A melt of a few hundred million facts runs for minutes with nothing to
-    # show for it. Progress goes to stderr so redirecting stdout still gets a
-    # clean result line.
-    from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
-
+    # Progress goes to stderr so stdout stays a clean result line. strata/docs/adr/0031
     bar = Progress(
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
@@ -370,11 +361,7 @@ def standardise_cmd(
 
 
 def _compose_table(rows) -> Table:
-    """Long-format composition rows, with timestamps trimmed to dates.
-
-    A cutoff and a knowledge time both print as full timestamps otherwise,
-    which wraps every row across two lines and makes a panel unreadable.
-    """
+    """Long-format composition rows, with timestamps trimmed to dates so a row fits one line."""
     table = Table(box=None, pad_edge=False)
     for column in ("entity", "spine", "data_through", "feature", "value", "knowable", "age"):
         table.add_column(column, overflow="fold")
@@ -405,9 +392,7 @@ def compose_cmd(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Resolve a composition, and pin it so it answers the same way forever."""
-    import json
-
-    from strata.feature_store.spec.compose import ComposeSpec
+    # Deferred: pulls in duckdb and boto3, which the CLI need not load to print --help.
     from strata.feature_store.store import compose as cmp
 
     settings = _settings(config)
@@ -458,6 +443,7 @@ def read_cmd(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Resolve a frozen version, warning about anything its pin withholds."""
+    # Deferred: pulls in duckdb and boto3, which the CLI need not load to print --help.
     from strata.feature_store.store import compose as cmp
 
     settings = _settings(config)
@@ -475,7 +461,7 @@ def read_cmd(
         _fail(str(exc))
 
     if warning.get("facts"):
-        # Pinning withholds data, so it must not do so silently.
+        # Pinning withholds data, so it must not do so silently. docs/adr/0007
         err.print(
             f"[yellow]note:[/yellow] {warning['facts']:,} fact(s) in "
             f"{', '.join(warning['groups'])} were knowable by {warning['cutoff']} but "
@@ -499,10 +485,6 @@ def versions_cmd(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Every frozen version of a dataset."""
-    import sqlalchemy as sa
-
-    from strata.feature_store.store.tables import dataset, dataset_version
-
     settings = _settings(config)
     with _engine(settings).connect() as connection:
         rows = (
@@ -543,6 +525,7 @@ def verify_cmd(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Check that the catalog and the store agree."""
+    # Deferred: pulls in duckdb and boto3, which the CLI need not load to print --help.
     from strata.feature_store.store import verify as verifier
 
     settings = _settings(config)
@@ -600,6 +583,7 @@ def runs_undo(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Roll a run's outputs back. Refuses if anything depends on them."""
+    # Deferred: pulls in duckdb and boto3, which the CLI need not load to print --help.
     from strata.feature_store.store import verify as verifier
 
     settings = _settings(config)
@@ -624,6 +608,7 @@ def release_prune(
     Never automatic. Re-standardising from the original file is the whole reason
     releases are kept, and this is the one command that gives that up.
     """
+    # Deferred: pulls in duckdb and boto3, which the CLI need not load to print --help.
     from strata.feature_store.store import verify as verifier
 
     settings = _settings(config)
@@ -651,9 +636,6 @@ def entity_list_cmd(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Freeze a named set of entity ids as a new version."""
-    from strata.feature_store.store import catalog
-    from strata.feature_store.store.runs import run as open_run
-
     settings = _settings(config)
     members = list(ids)
     if from_file:
@@ -684,10 +666,6 @@ def runs_ls(
     config: Path | None = typer.Option(None),
 ) -> None:
     """Recent runs."""
-    import sqlalchemy as sa
-
-    from strata.feature_store.store.tables import run as run_table
-
     settings = _settings(config)
     query = sa.select(run_table).order_by(run_table.c.started_at.desc()).limit(limit)
     if kind:
@@ -712,10 +690,6 @@ def runs_ls(
 
 
 def _describe(ref_type: str, ref_id: int, connection) -> str:
-    import sqlalchemy as sa
-
-    from strata.feature_store.store.tables import release as release_table
-
     if ref_type == "release":
         row = (
             connection.execute(sa.select(release_table).where(release_table.c.id == ref_id))
@@ -734,11 +708,6 @@ def runs_show(
     config: Path | None = typer.Option(None),
 ) -> None:
     """One run: what it was, what it read, what it produced."""
-    import sqlalchemy as sa
-
-    from strata.feature_store.store.tables import run as run_table
-    from strata.feature_store.store.tables import run_input, run_output
-
     settings = _settings(config)
     with _engine(settings).begin() as connection:
         row = (
@@ -778,11 +747,6 @@ def runs_show(
 
 def _walk_lineage(connection, run_id: int, seen: set[int], depth: int) -> None:
     """Print what produced this run's inputs, and what produced those, and so on."""
-    import sqlalchemy as sa
-
-    from strata.feature_store.store.tables import run as run_table
-    from strata.feature_store.store.tables import run_input, run_output
-
     if run_id in seen or depth > 12:
         return
     seen.add(run_id)

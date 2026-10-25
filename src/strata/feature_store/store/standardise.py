@@ -1,24 +1,13 @@
-"""Workflow step 3: a release becomes long-format facts.
+"""Workflow step 3: a release becomes long-format facts, in DuckDB so the melt can spill.
 
-The whole of it is a projection. Columns are renamed, reshaped and typed; no
-value is computed from another. That restraint is the boundary between this
-store and the post-processing that reads it, and it is easy to lose — a single
-"while we're here" expression in a config is all it takes.
-
-The reshape runs in DuckDB rather than in memory. A wide panel of four thousand
-columns melts to a few hundred million facts, which is comfortably larger than
-memory, and the sort that makes row-group statistics useful is larger still.
-DuckDB spills; a dataframe does not.
-
-**Nulls do not become rows.** A wide file is mostly empty — the seed panel is
-about half — and a null cell means "this was not reported", not "this was
-reported as nothing". Skipping them is what makes long format cheaper than wide
-here rather than more expensive, and it is only correct because the group
-declares its publisher's convention in ``retraction_policy``.
+A projection only: columns are renamed, reshaped and typed, and no value is
+computed from another. Null cells do not become rows. See ``docs/adr/0002``,
+``docs/adr/0005`` and ``docs/adr/0009``.
 """
 
 from __future__ import annotations
 
+import json
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,21 +15,30 @@ from pathlib import Path
 from typing import Any
 
 import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from strata.feature_store.spec import schema as long_schema
-from strata.feature_store.spec.canonical import content_hash, hash_file, short_hash, to_jsonable
+from strata.feature_store.spec.canonical import content_hash, hash_file, to_jsonable
 from strata.feature_store.spec.periods import UNBOUNDED
 from strata.feature_store.spec.standardise import StandardiseSpec, decompose
+from strata.feature_store.spec.timebasis import period_end_sql, period_start_sql
 from strata.feature_store.store import catalog, duck, objects
+from strata.feature_store.store import crosswalk as cw_module
 from strata.feature_store.store.config import Settings
 from strata.feature_store.store.runs import Run
 from strata.feature_store.store.runs import run as open_run
-from strata.feature_store.store.tables import feature, feature_group, feature_partition
+from strata.feature_store.store.tables import (
+    feature,
+    feature_group,
+    feature_partition,
+    run_input,
+    run_output,
+)
+from strata.feature_store.store.tables import run as run_table
 
 FEATURES_PREFIX = "features"
 
-#: Big enough that statistics are worth having, small enough that a query for a
-#: few features skips most of the file.
+#: Big enough for useful row-group statistics, small enough that a narrow query skips most parts.
 ROW_GROUP_SIZE = 122_880
 
 
@@ -71,12 +69,9 @@ def _quote(name: str) -> str:
 
 
 def guard_namespace(spec: StandardiseSpec, source: dict[str, Any], canonical: str) -> None:
-    """Invariant 2, enforced at ingest rather than inside a later join.
+    """Invariant 2 at ingest: a non-canonical source needs a pinned crosswalk, a canonical one none.
 
-    A source publishing in a vocabulary that is not the canonical one needs a
-    named crosswalk version, because the stored parquet is always canonical.
-    Failing here means an operator is watching one file; failing at query time
-    means an empty result set and a long afternoon.
+    See ``docs/adr/0005``.
     """
     native = source["native_namespace"]
     if native == canonical:
@@ -101,12 +96,8 @@ def _event_time_expression(spec: StandardiseSpec) -> str:
     return f"{column}::DATE"
 
 
-#: How many source columns to melt at a time. A four-thousand-column UNPIVOT
-#: builds an intermediate far larger than memory and fails outright; a few
-#: hundred streams comfortably. Batching by column rather than by row is
-#: deliberate: each batch holds a disjoint set of feature names, so each output
-#: part does too, and a query for three features reads the one part holding them
-#: instead of every part holding a slice of everything.
+#: Source columns melted per batch. By column rather than by row, so each output
+#: part holds a disjoint feature range and a narrow query reads one part.
 COLUMN_BATCH = 300
 
 
@@ -116,16 +107,7 @@ def _melt_query(
     columns: list[str],
     ingest_time: datetime,
 ) -> str:
-    """Reshape a batch of melted columns into the long schema.
-
-    Both melted layouts unpivot columns; they differ in what a column *header*
-    means, and therefore in which of the seven fields it becomes.
-
-    ``features_in_columns``  the header is a feature name, and the row carries
-                             the entity and the time
-    ``periods_in_columns``   the header is a period label, and the row carries
-                             the entity and the feature name
-    """
+    """Reshape a batch of melted columns into the long schema, under either melted layout."""
     entity = _quote(spec.entity.column)
     for step in spec.entity.normalise:
         entity = {
@@ -134,19 +116,10 @@ def _melt_query(
             "lower": f"lower({entity})",
         }[step]
 
-    # A modeled_lag group is the only one that leaves this null, because it
-    # derives the value at read from a rule in the catalog. Every other basis
-    # writes something, and a basis that wrote nothing would produce facts no
-    # as-of query can ever see: a null knowledge_time never satisfies
-    # `kt <= cutoff`, so the group would ingest cleanly, report its row count,
-    # and then compose to an empty panel with nothing saying why.
+    # Only modeled_lag leaves this null; any other basis must write something,
+    # since a null knowledge_time never satisfies kt <= cutoff. docs/adr/0003
     knowledge = "NULL::TIMESTAMP"
     if spec.knowledge_time.basis == "ingest_fallback":
-        # The download time. An upper bound on when the value became knowable,
-        # never a measurement of it, which is why this is the lowest fidelity
-        # the store recognises: it withholds data that was genuinely available
-        # earlier, and is wrong in the safe direction rather than the one that
-        # invalidates results.
         knowledge = f"TIMESTAMP '{ingest_time}'"
     elif spec.knowledge_time.basis == "file_release":
         knowledge = f"TIMESTAMP '{spec.knowledge_time.release_date} 00:00:00'"
@@ -159,9 +132,7 @@ def _melt_query(
         )
 
     if spec.event_time.from_column_name:
-        # The header is a period label, so the anchor decides what date it
-        # becomes -- and that decides what a backtest is allowed to see.
-        # See docs/adr/0001.
+        # The header is a period label, so the anchor decides its date. docs/adr/0001
         parsed = (
             f"strptime(raw_name, '{spec.event_time.format}')::DATE"
             if spec.event_time.format
@@ -215,8 +186,6 @@ def _melt_query(
 
 def _anchor_sql(expression: str, period: str, anchor: str) -> str:
     """Snap a parsed period label to the end (or start) of its period."""
-    from strata.feature_store.spec.timebasis import period_end_sql, period_start_sql
-
     if period in UNBOUNDED:
         return expression
     snapped = (
@@ -272,15 +241,10 @@ def _feature_columns(connection, source_path: str, spec: StandardiseSpec) -> lis
 
 
 def _feature_vocabulary(con, relation: str, spec: StandardiseSpec, melted: list[str]) -> list[str]:
-    """The feature names this group will hold.
+    """The feature names this group will hold: the melted headers, or the name column's values.
 
-    Under ``features_in_columns`` they are the melted column headers, known from
-    the schema alone. Under ``periods_in_columns`` the headers are years and the
-    names live in a column, so the vocabulary has to be read out of the data.
-
-    Either way it is a *vocabulary* rather than a summary of what happened to be
-    non-null, which is what lets a not-yet-published feature resolve to null
-    while a misspelled one is refused.
+    A vocabulary rather than a summary of what was non-null, so an unpublished
+    feature resolves to null while a misspelled one is refused.
     """
     if not spec.event_time.from_column_name:
         return [spec.features.name.rename.get(c, c) for c in melted]
@@ -298,11 +262,9 @@ def _feature_vocabulary(con, relation: str, spec: StandardiseSpec, melted: list[
 
 
 def read_vocabulary(con, local_path: str, spec: StandardiseSpec) -> dict[str, dict[str, Any]]:
-    """Load the companion file describing the features.
+    """Load the companion file describing the features, as a mapping from name to what it says.
 
-    Returns a mapping from feature name to whatever the file says about it.
-    Nothing here decides which features exist — the data does that — so a name
-    missing from this mapping simply gets a registry row with nothing attached.
+    Refuses a file missing a declared column.
     """
     vocabulary = spec.features.vocabulary
     reader = f"read_csv('{local_path}', header=true, all_varchar=true, sample_size=-1)"
@@ -339,18 +301,13 @@ def _register_features(
     described: dict[str, dict[str, Any]] | None = None,
 ) -> int:
     """Write the vocabulary registry for what this group actually contains."""
-    from sqlalchemy.dialects.postgresql import insert as pg_insert
-
     described = described or {}
     vocabulary = spec.features.vocabulary
     dtype = "num" if spec.features.kind == "numeric" else "str"
     rows = []
     for name in dict.fromkeys(names):
         entry = described.get(name, {})
-        # Structure read out of the name, plus whatever the publisher's own
-        # vocabulary file says. Kept in one blob rather than spread across
-        # columns because what a publisher documents differs by publisher, and
-        # a column per field would be a schema change for every new source.
+        # One blob: what a publisher documents differs by publisher.
         meta = to_jsonable(decompose(name, spec.features.meta))
         if vocabulary:
             meta.update({k: v for k, v in entry.items() if k in vocabulary.meta})
@@ -359,9 +316,7 @@ def _register_features(
                 "feature_group_id": group_id,
                 "name": name,
                 "dtype": dtype,
-                # A units map in the config wins over the file: it is the more
-                # specific statement, written for this group by whoever knew
-                # the file was wrong.
+                # The config's units map wins over the file as the more specific statement.
                 "unit": spec.features.units.get(name)
                 or (entry.get(vocabulary.unit) if vocabulary and vocabulary.unit else None),
                 "description": (
@@ -377,14 +332,8 @@ def _register_features(
         return 0
     with run.transaction() as connection:
         statement = pg_insert(feature).values(rows)
-        # A feature already registered keeps its identity and takes the better
-        # description. Doing nothing on conflict, which is what this did first,
-        # meant a vocabulary file added after the initial ingest never landed:
-        # the rows existed, so every one of them was skipped.
-        #
-        # `dtype` is deliberately not updated. One feature name is one dtype
-        # forever, and a re-registration that changed it would silently break
-        # every consumer that had already branched on it.
+        # Upsert so a vocabulary added after the first ingest lands; `dtype` is
+        # never updated, because one feature name is one dtype forever.
         connection.execute(
             statement.on_conflict_do_update(
                 index_elements=["feature_group_id", "name"],
@@ -393,10 +342,7 @@ def _register_features(
                     "description": sa.func.coalesce(
                         statement.excluded.description, feature.c.description
                     ),
-                    # Merged rather than replaced: the name-derived structure
-                    # and the publisher's own fields are both meta, and a
-                    # standardise that knows only one of them must not erase
-                    # the other.
+                    # Merged, not replaced: a run knowing one meta source must not erase the other.
                     "meta": sa.func.coalesce(feature.c.meta, sa.text("'{}'::jsonb")).op("||")(
                         sa.func.coalesce(statement.excluded.meta, sa.text("'{}'::jsonb"))
                     ),
@@ -445,35 +391,16 @@ def _ensure_group(
 
 
 def _source_relation(source_path: str) -> str:
-    """Read the release directly, once per column batch.
+    """Read the release directly, once per column batch, everything as text.
 
-    An earlier version staged the whole file to a wide parquet first, on the
-    assumption that re-reading a 750MB CSV per batch would dominate. It does
-    not, and the staging step could not be made to work at all: a four-thousand
-    column CSV read buffers enough per thread to exhaust memory whatever the row
-    group size, because the cost is in the reader rather than the writer.
-
-    Reading per batch is both simpler and faster, because DuckDB prunes the
-    projection during parsing — a batch touching 300 of 3,953 columns takes a
-    few seconds, and the whole melt is a couple of minutes.
-
-    Everything is read as text and cast afterwards. Type inference over
-    thousands of columns is expensive and unreliable, and a column that looks
-    integral for its first thousand rows and is not in its last is the kind of
-    thing that fails an hour in.
+    DuckDB prunes the projection while parsing, so re-reading beats staging a
+    wide parquet, and inference over thousands of columns is unreliable.
     """
     return f"read_csv('{source_path}', header=true, all_varchar=true, sample_size=-1)"
 
 
 def _existing_part(run: Run, group_id: int, input_hash: str) -> dict[str, Any] | None:
-    """A live partition already produced by this exact work, if there is one.
-
-    Matched on the input fingerprint rather than the output digest, and only
-    among partitions whose creating run finished — a part left behind by a run
-    that died is not evidence the work was done.
-    """
-    from strata.feature_store.store.tables import run as run_table
-
+    """A live partition a finished run already produced from this exact work, by input hash."""
     with run.transaction() as connection:
         row = (
             connection.execute(
@@ -514,14 +441,10 @@ def _write_part(
     input_hash: str,
     release_sha256: str,
 ) -> WrittenPart | None:
-    """Sort one view into parquet, put it in the bucket, then record it.
+    """Sort one view into parquet, put it in the bucket, then record it; ``None`` for an empty view.
 
-    Idempotence is keyed on the *inputs* — this release, this config, this batch
-    — rather than on the bytes produced. Every fact carries an ``ingest_time``,
-    so re-standardising identical data produces a different file with a
-    different digest, and a content-addressed check would never match. What
-    "already done" means here is that the same work was done, not that the same
-    bytes came out.
+    Idempotence is keyed on the inputs, not the bytes: every fact carries an
+    ``ingest_time``, so identical work never yields identical bytes.
     """
     existing = _existing_part(current, group_id, input_hash)
     if existing is not None:
@@ -541,7 +464,7 @@ def _write_part(
     digest, size = hash_file(str(parquet_path))
     key = f"{FEATURES_PREFIX}/{group_name}/entity_namespace={namespace}/part-{digest[:16]}.parquet"
 
-    # Bytes first, verified, then the catalog row.
+    # Bytes first, verified, then the catalog row (invariant 3).
     s3.upload_file(
         Filename=str(parquet_path),
         Bucket=bucket,
@@ -568,13 +491,9 @@ def _write_part(
                 content_sha256=digest,
                 size_bytes=size,
                 row_count=rows,
-                # The feature range is what lets a reader skip a whole part without
-                # opening it, which is the point of batching by column.
                 partition_values={
                     "entity_namespace": namespace,
                     "input_hash": input_hash,
-                    # Which release these facts came from, so a re-standardise can
-                    # find the parts it replaces.
                     "release_sha256": release_sha256,
                     "feature_min": bounds[4],
                     "feature_max": bounds[5],
@@ -594,32 +513,15 @@ def _write_part(
 
 
 def _supersede_previous(run: Run, group_ids: list[int], release_id: int) -> int:
-    """Retire parts this run replaced.
+    """Supersede the live parts an earlier run wrote from this release that this run did not reuse.
 
-    A partition is replaced when it sits in one of these groups, was written by
-    an earlier run that read the *same release*, and **this run has not claimed
-    it**. That last condition is not a detail: an unchanged batch is reused
-    rather than rewritten, and the reusing run records it as its own output.
-    Without the exclusion a re-standardise supersedes the very parts it just
-    decided were still good, and the group ends up with nothing live at all.
-
-    Matched through lineage rather than through anything stored on the partition
-    itself: ``run_input`` already records which release a run read, it is the
-    same fact, and it works for partitions written before this function existed.
-    A key added to ``partition_values`` would only match rows written after it
-    was introduced, which is precisely when a supersede rule is least useful.
-
-    Marked rather than deleted, so a frozen version pinned before the correction
-    keeps resolving to what it resolved to then — the whole point of pinning —
-    and ``verify`` can still account for the bytes.
+    Matched through lineage, so parts written before this rule existed are
+    covered; marked rather than deleted so earlier pins keep resolving. See ``docs/adr/0007``.
     """
-    from strata.feature_store.store.tables import run_input, run_output
-
     if not group_ids:
         return 0
 
-    # Everything this run produced or reused. A reused part is as current as a
-    # freshly written one; the run simply found the work already done.
+    # A reused part is this run's output too, and must not be superseded.
     kept = (
         sa.select(run_output.c.ref_id)
         .where(run_output.c.run_id == run.id, run_output.c.ref_type == "feature_partition")
@@ -658,8 +560,6 @@ def standardise(
     progress=None,
 ) -> StandardiseResult:
     """Turn one release into long-format parquet, and record what happened."""
-    from strata.feature_store.store import crosswalk as cw_module
-
     s3 = s3 or objects.client(settings.storage)
     bucket = settings.storage.bucket
 
@@ -805,9 +705,6 @@ def standardise(
                     s3=s3,
                     bucket=bucket,
                     role=role,
-                    # This release, this config, this batch. Identical work is
-                    # already done; identical *bytes* never happen, because
-                    # every fact carries the time it was ingested.
                     input_hash=content_hash(
                         {
                             "config": params,
@@ -851,16 +748,8 @@ def standardise(
                 registered += _register_features(current, group_id, vocabulary, spec, described)
                 current.wrote("feature_group", group_id, role="group")
 
-        # A re-standardise of the same release under a changed config describes
-        # the same source data a different way, so the previous parts are
-        # replaced rather than added to. Without this both stay live and every
-        # fact is counted twice.
-        #
-        # Superseded rather than deleted: a frozen version pinned before the
-        # correction keeps resolving to what it resolved to then, which is the
-        # whole point of pinning. Done once at the end rather than per part,
-        # because a run that died halfway would otherwise leave a group half
-        # described by each config, which is worse than either alone.
+        # Once at the end, not per part, so a run that dies halfway leaves the
+        # old parts whole rather than a group half described by each config.
         superseded = (
             0 if dry_run else _supersede_previous(current, list(groups.values()), release["id"])
         )
@@ -893,8 +782,6 @@ def standardise(
 
 def load_spec(path: str | Path, overrides: dict[str, Any] | None = None) -> StandardiseSpec:
     """Read a config, apply ``--set`` overrides, and validate the result."""
-    import json
-
     payload = json.loads(Path(path).read_text())
     for dotted, value in (overrides or {}).items():
         target = payload
@@ -906,20 +793,12 @@ def load_spec(path: str | Path, overrides: dict[str, Any] | None = None) -> Stan
 
 
 def check_granularity(con, spec: StandardiseSpec, granularity: str) -> int:
-    """Invariant 11: event times must land on the source's declared boundary.
+    """Invariant 11: how many event times miss the declared boundary under either anchor.
 
-    A wrong anchor shifts every derived knowledge_time by up to a period, and
-    half the time in the direction that hands a backtest data it could not have
-    had.
-
-    Both anchors are checked. An earlier version returned zero for
-    ``start`` without looking, which meant a start-anchored source was never
-    validated at all — the check existed, passed, and proved nothing.
+    See ``docs/adr/0001``.
     """
     if granularity in UNBOUNDED:
         return 0
-    from strata.feature_store.spec.timebasis import period_end_sql, period_start_sql
-
     boundary = (
         period_start_sql("event_time", granularity)
         if spec.event_time.anchor == "start"
@@ -928,7 +807,3 @@ def check_granularity(con, spec: StandardiseSpec, granularity: str) -> int:
     return con.execute(
         f"SELECT count(*) FROM facts WHERE event_time <> ({boundary})::DATE"
     ).fetchone()[0]
-
-
-def short_key(payload: Any) -> str:
-    return short_hash(payload)
